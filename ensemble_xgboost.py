@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import rioxarray 
 from shapely.geometry import Polygon, Point
 from feature_engineering import FeatureEngineering
+from concurrent.futures import ProcessPoolExecutor
 import csv
 
 rows = []
@@ -19,7 +20,7 @@ range_id = 1
 # Config options
 is_single_point = True
 
-model_radius = 0.0
+model_radius = 0.25
 silo_radius = 0.25
 n_points_inner_circle = 6
 radius_inner_circle = 0.6
@@ -29,7 +30,7 @@ radius_outer_circle = 1.039
 def run_single_point_analysis(grid_point):
     # Datasets
     silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed.nc")
-    gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}.nc")
+    gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc")
 
     # Initial Analysis
     def single_point_data_analysis():
@@ -57,9 +58,10 @@ def run_single_point_analysis(grid_point):
 
         return tuple(map(list, zip(*coords)))
 
+
     if is_single_point:
 
-        gcms = gcms.sel(latitude=slice(grid_point[0] - model_radius, grid_point[0] + model_radius), longitude=slice(grid_point[1] - model_radius, grid_point[1] + model_radius))
+        # gcms = gcms.sel(latitude=slice(grid_point[0] - model_radius, grid_point[0] + model_radius), longitude=slice(grid_point[1] - model_radius, grid_point[1] + model_radius))
 
         ## Inner circle
         points_1 = construct_circle(grid_point, n_points_inner_circle, radius_inner_circle, include_origin=True)
@@ -69,13 +71,36 @@ def run_single_point_analysis(grid_point):
         print(points[0])
         print(points[1])
         print(len(points[0]))
-        lat_da = xr.DataArray(points[0], dims="point")
-        lon_da = xr.DataArray(points[1], dims="point")
+        # lat_da = xr.DataArray(points[0], dims="point")
+        # lon_da = xr.DataArray(points[1], dims="point")
 
-        silo = silo.sel(latitude=lat_da, longitude=lon_da, method="nearest")
-        silo = silo.assign_coords(point=pd.MultiIndex.from_arrays([silo.latitude.values, silo.longitude.values], names=["latitude", "longitude"])).unstack("point")
-        silo = silo.sortby(["latitude", "longitude"])
+        def select_circular_points(dataset, points):
+            lat_da = xr.DataArray(points[0], dims="point")
+            lon_da = xr.DataArray(points[1], dims="point")
+            dataset = dataset.sel(latitude=lat_da, longitude=lon_da, method="nearest")
+            print(dataset.latitude.values)
+            print(dataset.longitude.values)
+            dataset = dataset.assign_coords(point=pd.MultiIndex.from_arrays([dataset.latitude.values, dataset.longitude.values], names=["latitude", "longitude"])).unstack("point")
+            dataset = dataset.sortby(["latitude", "longitude"])
+            return dataset
 
+        def dataset_within_radius(dataset, grid_point, radius):
+        
+            dist = np.sqrt((dataset.latitude - grid_point[0])**2 + (dataset.longitude - grid_point[1])**2)
+            mask = dist <= radius
+
+            selected = dataset.where(mask, drop=True)
+            return selected
+
+        # Option 1
+        # gcms = dataset_within_radius(gcms, grid_point, model_radius)
+        # silo = dataset_within_radius(silo, grid_point, model_radius)
+
+        # Option 2
+        silo = select_circular_points(silo, points)
+        gcms = select_circular_points(gcms, points)
+
+    print(gcms)
     # single_point_data_analysis()
     # plt.show()
     # plt.clf()
@@ -93,6 +118,10 @@ def run_single_point_analysis(grid_point):
     feature_dataset.create_lead_time_features(["pr"])
     # feature_dataset.add_obs_window_time(period=1)
 
+    feature_dataset.ds["latitude"] = feature_dataset.ds["latitude"].round(decimals=2)
+    feature_dataset.ds["longitude"] = feature_dataset.ds["longitude"].round(decimals=2)
+    silo["longitude"] = silo["longitude"].round(decimals=2)
+    silo["latitude"] = silo["latitude"].round(decimals=2)
 
     dataset = xr.merge([feature_dataset.ds, silo], join="outer")
     dataset = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
@@ -107,14 +136,17 @@ def run_single_point_analysis(grid_point):
     dataset = dataset.dropna(subset=["pr"]) # Could be because points selected before outer merge could be Nan
     dataset = dataset.reset_index().drop(columns=["time"])
 
+    # Option 1
+    # dataset["pr"] = np.log(dataset["pr"] + 1)
 
-    dataset["pr"] = np.log(dataset["pr"] + 1)
-
+    # Option 2
+    dataset["pr"] = np.cbrt(dataset["pr"])
 
     dataset = dataset[dataset["month"].isin([10, 11, 12, 1, 2, 3])]
     # dataset = pd.get_dummies(dataset, columns=["month"], dtype=int)
     dataset = dataset.drop(columns=["month", "latitude", "longitude"]) 
 
+    print(dataset)
 
 
     is_yearly_split = True
@@ -187,14 +219,6 @@ def run_single_point_analysis(grid_point):
             y_pred = np.append(y_pred, y_val_pred)
             importance = clf_xgb_model.best_params_
 
-    
-        y_pred = cross_val_predict(
-            xgb_model,
-            X.drop(columns=["year"]),
-            y,
-            groups=groups,
-            cv=LeaveOneGroupOut(),
-        )
         
     else:
         X_train, X_test, y_train, y_test = train_test_split(
@@ -228,8 +252,13 @@ def run_single_point_analysis(grid_point):
             ax.set_title(model)
         plt.show()
 
-    y_pred = np.exp(y_pred) - 1
-    y = np.exp(y) - 1
+    # Option 1
+    # y_pred = np.exp(y_pred) - 1
+    # y = np.exp(y) - 1
+
+    # Option 2
+    y_pred = np.power(y_pred, 3)
+    y = np.power(y, 3)
 
     if is_yearly_split:
         testing = X.copy()
@@ -274,9 +303,8 @@ def run_single_point_analysis(grid_point):
     for model, rmse in model_rmse.items():
         print(f"{model} RMSE: {rmse}")
 
-    rows.append(
-        [grid_point, model_mae["XGBoost"], model_mae["ecmwf"], model_mae["ukmo"], model_mae["access"], model_rmse["XGBoost"], model_rmse["ecmwf"], model_rmse["ukmo"], model_rmse["access"]]
-    )
+    return [grid_point, model_mae["XGBoost"], model_mae["ecmwf"], model_mae["ukmo"], model_mae["access"], model_rmse["XGBoost"], model_rmse["ecmwf"], model_rmse["ukmo"], model_rmse["access"]]
+    
 
 
 if range_id == 0:
@@ -285,13 +313,24 @@ if range_id == 0:
 elif range_id == 1:
     lat_range = (-29, -25)
     lon_range = (150, 154)
+elif range_id == 2:
+    lat_range = (-20, -16)
+    lon_range = (143, 147) 
+
+point_arg_list = []
 for lat in range(*lat_range):
     for lon in range(*lon_range):
-        print(f"Using {lat}, {lon}")
-        run_single_point_analysis((np.float64(lat), np.float64(lon)))
+        point_arg_list.append((np.float64(lat), np.float64(lon)))
+        # print(f"Using {lat}, {lon}")
+        # run_single_point_analysis((np.float64(lat), np.float64(lon)))
+
+with ProcessPoolExecutor() as executor:
+    results = executor.map(run_single_point_analysis, point_arg_list)
+
+rows = list(results)
 
 headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse"]
-with open(f"output_{range_id}.csv", mode='w', newline='', encoding='utf-8') as file:
+with open(f"output_{range_id}_cbrt.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(headers)   # Writes a single row (header)
     writer.writerows(rows)     # Writes multiple data rows at once

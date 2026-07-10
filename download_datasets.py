@@ -7,15 +7,21 @@ request = {
     "month": ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"],
     "leadtime_month": ["1", "2", "3", "4", "5", "6"],
     "data_format": "netcdf",
-    "grid": [1.0, 1.0],
+    "grid": [0.05, 0.05],
     "product_type": ["monthly_mean"],
 }
 
 areas = [
-    { "area" : [ -25, 142, -22, 145 ] },
+    { "area" : [ -22, 142, -25, 145 ] },
     { "area" : [ -26, 150, -29, 153 ] },
-    { "area" : [-20, 143, -17, 146 ] }
+    { "area" : [ -17, 143, -20, 146 ] }
 ]
+
+areas = [
+   {"area": [area["area"][0] + 3, area["area"][1] - 3, area["area"][2] - 3, area["area"][3] + 3] }  for area in areas
+]
+
+print(areas)
 
 models = [
     {
@@ -39,7 +45,7 @@ def download_datasets():
     for model in models:
         for i, area in enumerate(areas):
             client.retrieve(dataset, request | model | area).download(
-                target=f"{model['originating_centre']}_{model['system']}_{i}.{extension}"
+                target=f"{model['originating_centre']}_{model['system']}_{i}_new.{extension}"
             )
 
 
