@@ -1,4 +1,5 @@
 import xarray as xr
+import argparse
 from sklearn.model_selection import train_test_split, LeaveOneGroupOut, cross_val_score, cross_val_predict, GridSearchCV
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 import xgboost as xgb
@@ -14,8 +15,20 @@ from feature_engineering import FeatureEngineering
 from concurrent.futures import ProcessPoolExecutor
 import csv
 
+parser = argparse.ArgumentParser(
+                    prog='ensemble_xgboost',
+                    description='Ensemble XGBoost')
+
+parser.add_argument('-r', '--region', default=1, type=int, choices=list(range(3)))
+parser.add_argument('-l', '--lead_time', default=1, type=int, choices=list(range(1, 7)))
+parser.add_argument('-f', '--feature', default="cbrt", type=str, choices=["cbrt", "log"])
+args = parser.parse_args()
+
 rows = []
-range_id = 1
+print(args)
+range_id = args.region
+print(f"Region: {range_id}")
+print(f"Region: {type(range_id)}")
 
 # Config options
 is_single_point = True
@@ -86,8 +99,8 @@ def run_single_point_analysis(grid_point):
 
         def dataset_within_radius(dataset, grid_point, radius):
         
-            dist = np.sqrt((dataset.latitude - grid_point[0])**2 + (dataset.longitude - grid_point[1])**2)
-            mask = dist <= radius
+            dist = np.hypot(dataset.latitude - grid_point[0], dataset.longitude - grid_point[1])
+            mask = xr.ufuncs.bitwise_or(dist <= radius, np.isclose(dist, radius))
 
             selected = dataset.where(mask, drop=True)
             return selected
@@ -95,6 +108,8 @@ def run_single_point_analysis(grid_point):
         # Option 1
         gcms = dataset_within_radius(gcms, grid_point, model_radius)
         silo = dataset_within_radius(silo, grid_point, model_radius)
+        gcms_stacked = gcms.isel(time=2, lead=0, model=0)["pr"].stack(x=['latitude','longitude'])
+        points = len(gcms_stacked[gcms_stacked.notnull()])
 
         # Option 2
         # silo = select_circular_points(silo, points)
@@ -111,7 +126,7 @@ def run_single_point_analysis(grid_point):
     # plt.clf()
 
 
-    feature_dataset = FeatureEngineering(gcms, lead_months=1) 
+    feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time) 
     # feature_dataset.enable_wet_season_feature()
     # feature_dataset.enable_climate_classification()
     feature_dataset.create_lead_time_features(["pr"])
@@ -135,8 +150,12 @@ def run_single_point_analysis(grid_point):
     dataset = dataset.dropna(subset=["pr"]) # Could be because points selected before outer merge could be Nan
     dataset = dataset.reset_index().drop(columns=["time"])
 
-
-    dataset["pr"] = np.log(dataset["pr"] + 1)
+    if args.feature == "log":
+        dataset["pr"] = np.log(dataset["pr"] + 1)
+    elif args.feature == "cbrt":
+        dataset["pr"] = np.cbrt(dataset["pr"])
+    else:
+        raise AssertionError()
 
 
     dataset = dataset[dataset["month"].isin([10, 11, 12, 1, 2, 3])]
@@ -249,8 +268,12 @@ def run_single_point_analysis(grid_point):
             ax.set_title(model)
         plt.show()
 
-    y_pred = np.exp(y_pred) - 1
-    y = np.exp(y) - 1
+    if args.feature == "log":
+        y_pred = np.exp(y_pred) - 1
+        y = np.exp(y) - 1
+    elif args.feature == "cbrt":
+        y_pred = np.power(y_pred, 3)
+        y = np.power(y, 3)
 
     if is_yearly_split:
         testing = X.copy()
@@ -258,7 +281,7 @@ def run_single_point_analysis(grid_point):
         testing["obs_pr"] = y
         if silo_radius > 0:
             # idx = 8 * (round(silo_radius / 0.05)) + 1
-            idx = 77 # len(points[0])
+            idx = points # len(points[0])
             print(idx)
             testing = testing[(idx//2)::idx]  # Select only middle points
             print(testing)
@@ -273,15 +296,15 @@ def run_single_point_analysis(grid_point):
     testing_temp = testing # .drop(testing.index[-4])
     ukmo_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["ukmo_0_pr"])
     # TODO: Why masks below?
-    ecmwf_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["ecmwf_0_pr"])
-    access_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["access_0_pr"])
+    # ecmwf_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["ecmwf_0_pr"])
+    # access_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["access_0_pr"])
     print(testing_temp["obs_pr"][ukmo_mask])
 
     model_mae = {
         "XGBoost" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : mean_absolute_error(testing_temp["obs_pr"][ecmwf_mask], testing_temp["ecmwf_0_pr"][ecmwf_mask]),
+        "ecmwf" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["ecmwf_0_pr"]),
         "ukmo" : mean_absolute_error(testing["obs_pr"][ukmo_mask], testing["ukmo_0_pr"][ukmo_mask]),
-        "access" : mean_absolute_error(testing_temp["obs_pr"][access_mask], testing_temp["access_0_pr"][access_mask])
+        "access" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["access_0_pr"])
     }
 
     for model, mae in model_mae.items():
@@ -290,9 +313,9 @@ def run_single_point_analysis(grid_point):
 
     model_rmse = {
         "XGBoost" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : root_mean_squared_error(testing_temp["obs_pr"][ecmwf_mask], testing_temp["ecmwf_0_pr"][ecmwf_mask]),
+        "ecmwf" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["ecmwf_0_pr"]),
         "ukmo" : root_mean_squared_error(testing["obs_pr"][ukmo_mask], testing["ukmo_0_pr"][ukmo_mask]),
-        "access" : root_mean_squared_error(testing_temp["obs_pr"][access_mask], testing_temp["access_0_pr"][access_mask])
+        "access" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["access_0_pr"])
     }
 
     for model, rmse in model_rmse.items():
@@ -325,7 +348,7 @@ rows = list(results)
 
 
 headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse"]
-with open(f"output_{range_id}.csv", mode='w', newline='', encoding='utf-8') as file:
+with open(f"/scratch/tm70/ag9761/iceds_datasets/output_region{range_id}_lead{args.lead_time}_feature{args.feature}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(headers)   # Writes a single row (header)
     writer.writerows(rows)     # Writes multiple data rows at once
