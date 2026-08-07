@@ -14,6 +14,8 @@ from shapely.geometry import Polygon, Point
 from feature_engineering import FeatureEngineering
 from concurrent.futures import ProcessPoolExecutor
 import csv
+from cmethods import adjust
+
 
 parser = argparse.ArgumentParser(
                     prog='ensemble_xgboost',
@@ -25,10 +27,8 @@ parser.add_argument('-f', '--feature', default="cbrt", type=str, choices=["cbrt"
 args = parser.parse_args()
 
 rows = []
-print(args)
 range_id = args.region
 print(f"Region: {range_id}")
-print(f"Region: {type(range_id)}")
 
 # Config options
 is_single_point = True
@@ -97,19 +97,46 @@ def run_single_point_analysis(grid_point):
             dataset = dataset.sortby(["latitude", "longitude"])
             return dataset
 
-        def dataset_within_radius(dataset, grid_point, radius):
+        def dataset_within_radius(dataset, grid_point, radius, max_radius=0.40, cutoff_points=81):
+
+            # Incrementally increase radius until hit minimum number of poitns
+            while radius <= max_radius:
         
-            dist = np.hypot(dataset.latitude - grid_point[0], dataset.longitude - grid_point[1])
-            mask = xr.ufuncs.bitwise_or(dist <= radius, np.isclose(dist, radius))
+                dist = np.hypot(dataset.latitude - grid_point[0], dataset.longitude - grid_point[1])
+                mask = xr.ufuncs.bitwise_or(dist <= radius, np.isclose(dist, radius))
 
-            selected = dataset.where(mask, drop=True)
-            return selected
+                selected = dataset.where(mask, drop=True)
 
+                selected_stacked = selected.isel(time=0)["pr"].stack(x=['latitude','longitude'])
+                points = len(selected_stacked[selected_stacked.notnull()])
+
+                if points >= cutoff_points:
+                    break
+
+                radius += 0.05
+
+            if points < cutoff_points:
+                raise AssertionError(f"n_points: {points} Cutoff Points: {cutoff_points} Location: {grid_point}")
+                
+            return selected, points
+
+
+        gcms["latitude"] = gcms["latitude"].round(decimals=2)
+        gcms["longitude"] = gcms["longitude"].round(decimals=2)
+        silo["longitude"] = silo["longitude"].round(decimals=2)
+        silo["latitude"] = silo["latitude"].round(decimals=2)
+        
         # Option 1
-        gcms = dataset_within_radius(gcms, grid_point, model_radius)
-        silo = dataset_within_radius(silo, grid_point, model_radius)
-        gcms_stacked = gcms.isel(time=2, lead=0, model=0)["pr"].stack(x=['latitude','longitude'])
-        points = len(gcms_stacked[gcms_stacked.notnull()])
+
+        cutoff_points = 81
+        silo, points = dataset_within_radius(silo, grid_point, model_radius, cutoff_points)
+        # gcms = dataset_within_radius(gcms, grid_point, model_radius)
+
+        mask = silo["pr"].notnull()
+        gcms = gcms.where(mask, drop=True)
+
+        
+
 
         # Option 2
         # silo = select_circular_points(silo, points)
@@ -129,18 +156,22 @@ def run_single_point_analysis(grid_point):
     feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time) 
     # feature_dataset.enable_wet_season_feature()
     # feature_dataset.enable_climate_classification()
+    feature_dataset.select_lead_time(args.lead_time)
     feature_dataset.create_lead_time_features(["pr"])
     # feature_dataset.add_obs_window_time(period=1)
 
-    feature_dataset.ds["latitude"] = feature_dataset.ds["latitude"].round(decimals=2)
-    feature_dataset.ds["longitude"] = feature_dataset.ds["longitude"].round(decimals=2)
-    silo["longitude"] = silo["longitude"].round(decimals=2)
-    silo["latitude"] = silo["latitude"].round(decimals=2)
+
 
     dataset = xr.merge([feature_dataset.ds, silo], join="outer")
     dataset = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
 
     dataset = dataset.to_dataframe().sort_values(by=['time', "latitude", "longitude"])
+
+    dataset["is_centre"] = np.where((np.isclose(dataset.index.get_level_values("latitude"), grid_point[0])) & (np.isclose(dataset.index.get_level_values("longitude"), grid_point[1])), 1, 0)
+    assert dataset["is_centre"].sum() == 288
+
+    # Rounded Index to integer (upto 0.5 degree)
+    
     if silo_radius > 0:
         rounded_index = pd.MultiIndex.from_tuples(
             [(round(t[0]), round(t[1]), t[2]) for t in dataset.index],
@@ -220,13 +251,23 @@ def run_single_point_analysis(grid_point):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
+            # TODO: Need to convert to NetCDF back and forth
+
+            # adjust(
+            #     method="quantile_mapping",
+            #     obs = y_train,
+            #     simh = X_train,
+            #     simp= X_val,
+            #     kind="+",
+            #     n_quantiles=80,
+            # )
+
             xgb_model = get_xgboost_model()
             clf_xgb_model = GridSearchCV(xgb_model, param_grid)
 
+            clf_xgb_model.fit(X_train.drop(columns=["year", "is_centre"]), y_train) # Uses 5-fold cross validation
 
-            clf_xgb_model.fit(X_train.drop(columns=["year"]), y_train) # Uses 5-fold cross validation
-
-            y_val_pred = clf_xgb_model.predict(X_val.drop(columns=["year"]))
+            y_val_pred = clf_xgb_model.predict(X_val.drop(columns=["year", "is_centre"]))
             # if silo_radius > 0.0:
             #     y_val_pred = y_val_pred[4::9]  # Select only middle points
             #     print(len(y_val_pred))
@@ -283,7 +324,9 @@ def run_single_point_analysis(grid_point):
             # idx = 8 * (round(silo_radius / 0.05)) + 1
             idx = points # len(points[0])
             print(idx)
-            testing = testing[(idx//2)::idx]  # Select only middle points
+            testing = testing[X["is_centre"] == 1]
+            # testing = testing[(idx//2)::idx]  # Select only middle points
+
             print(testing)
     else:
         testing = X_test.copy()
@@ -294,17 +337,14 @@ def run_single_point_analysis(grid_point):
 
 
     testing_temp = testing # .drop(testing.index[-4])
-    ukmo_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["ukmo_0_pr"])
-    # TODO: Why masks below?
-    # ecmwf_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["ecmwf_0_pr"])
-    # access_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing["access_0_pr"])
-    print(testing_temp["obs_pr"][ukmo_mask])
+    testing_temp = testing_temp.iloc[(args.lead_time - 1):]
+    ukmo_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing[f"ukmo_{args.lead_time - 1}_pr"])
 
     model_mae = {
         "XGBoost" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["ecmwf_0_pr"]),
-        "ukmo" : mean_absolute_error(testing["obs_pr"][ukmo_mask], testing["ukmo_0_pr"][ukmo_mask]),
-        "access" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["access_0_pr"])
+        "ecmwf" : mean_absolute_error(testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
+        "ukmo" : mean_absolute_error(testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
+        "access" : mean_absolute_error(testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
     }
 
     for model, mae in model_mae.items():
@@ -313,9 +353,9 @@ def run_single_point_analysis(grid_point):
 
     model_rmse = {
         "XGBoost" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["ecmwf_0_pr"]),
-        "ukmo" : root_mean_squared_error(testing["obs_pr"][ukmo_mask], testing["ukmo_0_pr"][ukmo_mask]),
-        "access" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["access_0_pr"])
+        "ecmwf" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
+        "ukmo" : root_mean_squared_error(testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
+        "access" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
     }
 
     for model, rmse in model_rmse.items():
