@@ -1,5 +1,6 @@
 import xarray as xr
 import argparse
+import re
 from sklearn.model_selection import train_test_split, LeaveOneGroupOut, cross_val_score, cross_val_predict, GridSearchCV
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 import xgboost as xgb
@@ -24,6 +25,18 @@ parser = argparse.ArgumentParser(
 parser.add_argument('-r', '--region', default=1, type=int, choices=list(range(3)))
 parser.add_argument('-l', '--lead_time', default=1, type=int, choices=list(range(1, 7)))
 parser.add_argument('-f', '--feature', default="cbrt", type=str, choices=["cbrt", "log"])
+
+
+# Bias correction options
+parser.add_argument('--bc_exclude_percentile', default=85.0, type=float,
+                     help="Percentile (on obs and simh separately) above which values "
+                          "are treated as 'extreme' and excluded from the quantile "
+                          "mapping fit.")
+parser.add_argument('--bc_extrapolate_extremes', action='store_true',
+                     help="If set, the mapping fit on non-extreme values is still "
+                          "applied to (extrapolated onto) extreme values. If not set "
+                          "(default), extreme values are left uncorrected (identity).")
+
 args = parser.parse_args()
 
 rows = []
@@ -227,6 +240,218 @@ def run_single_point_analysis(grid_point):
     def xgboost_predict(xgb_model):
         return xgb_model.predict(X_test)
 
+    def get_forecast_columns(df):
+        """GCM forecast columns eligible for bias correction (e.g. 'ecmwf_0_pr')."""
+        return [c for c in df.columns if re.match(r"^(ecmwf|access|ukmo)_\d+_pr$", c)]
+
+    def bias_correct_with_cmethods(X_train, X_val, y_train, method="quantile_mapping",
+                                    kind="+", n_quantiles=80,
+                                    exclude_percentile=95.0, extrapolate_extremes=False):
+        """
+        Bias-correct each GCM forecast column in both X_train and X_val against
+        y_train (observations), using X_train's matching column as the historical
+        simulation (simh) in both cases.
+ 
+        The quantile mapping is FIT only on non-extreme obs/simh pairs: a training
+        row is excluded from fitting if either its obs value or its simh value
+        exceeds its own `exclude_percentile`-th percentile. This stops a small
+        number of extreme observed/forecast values from distorting the quantile
+        mapping applied across the whole (mostly non-extreme) distribution.
+ 
+        What happens to extreme values when APPLYING the fitted mapping is
+        controlled by `extrapolate_extremes`:
+          - False (default): values above the simh extreme threshold are left
+            uncorrected (identity) rather than extrapolated through a mapping
+            that was never fit on extreme data.
+          - True: the fitted (non-extreme) mapping is extrapolated onto extreme
+            values too. Use with caution - this uses cmethods' own
+            extrapolation behavior beyond the quantiles it was trained on.
+ 
+        Correcting X_train too (against itself) keeps the distribution XGBoost
+        trains on consistent with what it sees at inference time on X_val.
+        Builds xarray.DataArrays directly from the pandas data, since
+        python-cmethods requires xarray.DataArray inputs rather than raw pandas
+        objects.
+        """
+        X_train_corrected = X_train.copy()
+        X_val_corrected = X_val.copy()
+ 
+        # Minimum number of (obs, simh) pairs required before we trust a fitted
+        # quantile mapping. Below this, a column (e.g. one with heavy NaNs,
+        # like ukmo at short lead times) is left entirely uncorrected instead
+        # of erroring out or fitting on a handful of noisy points.
+        min_fit_points = max(10, n_quantiles)
+ 
+        # Threshold defined on obs (y_train). Use nanpercentile defensively,
+        # though y_train (post dropna on "pr") should not contain NaNs.
+        obs_threshold = np.nanpercentile(y_train.values, exclude_percentile)
+ 
+        def to_1d_array(corrected, var_name):
+            """adjust() may return a DataArray or a Dataset depending on the
+            python-cmethods version installed; normalize either to a flat
+            numpy array."""
+            if isinstance(corrected, xr.Dataset):
+                if var_name in corrected.data_vars:
+                    corrected = corrected[var_name]
+                else:
+                    corrected = corrected[list(corrected.data_vars)[0]]
+            return np.asarray(corrected).ravel()
+ 
+        for col in get_forecast_columns(X_train):
+ 
+            simh_full = X_train[col].values
+ 
+            # GCM columns (e.g. ukmo at short lead times) can be heavily
+            # NaN. np.percentile propagates NaN -> NaN threshold -> every
+            # comparison silently evaluates False -> empty fit/apply arrays
+            # -> adjust() crashes on nanmax of a zero-size array. Use
+            # nanpercentile and require enough *valid, non-extreme* pairs
+            # before attempting to fit at all.
+            valid_mask = ~np.isnan(y_train.values) & ~np.isnan(simh_full)
+            n_valid = int(valid_mask.sum())
+ 
+            if n_valid < min_fit_points:
+                print(f"[bias_correct] '{col}': only {n_valid} valid (non-NaN) "
+                      f"obs/simh pairs (< {min_fit_points}); skipping correction, "
+                      "leaving column unmodified.")
+                continue
+ 
+            simh_threshold = np.nanpercentile(simh_full[valid_mask], exclude_percentile)
+ 
+            # Exclude a training pair from the FIT if either side is extreme
+            # or missing.
+            non_extreme_mask = valid_mask & (y_train.values <= obs_threshold) & (simh_full <= simh_threshold)
+ 
+            obs_fit = y_train.values[non_extreme_mask]
+            simh_fit = simh_full[non_extreme_mask]
+ 
+            if len(obs_fit) < min_fit_points:
+                print(f"[bias_correct] '{col}': only {len(obs_fit)} non-extreme "
+                      f"pairs available for fitting (< {min_fit_points}); "
+                      "skipping correction, leaving column unmodified.")
+                continue
+ 
+            obs_da = xr.DataArray(
+                obs_fit, dims="time",
+                coords={"time": np.arange(len(obs_fit))}, name="obs_pr",
+            )
+            simh_fit_da = xr.DataArray(
+                simh_fit, dims="time",
+                coords={"time": np.arange(len(simh_fit))}, name=col,
+            )
+ 
+            def apply_correction(simp_values):
+                simp_values = simp_values.copy()
+ 
+                # NaNs in simp can't be passed through adjust(); carve them
+                # out up front and restore them (as NaN) afterwards.
+                simp_nan_mask = np.isnan(simp_values)
+                simp_corrected = simp_values.copy()
+ 
+                if extrapolate_extremes:
+                    target_mask = ~simp_nan_mask
+                else:
+                    # Leave extreme (or NaN) simp values uncorrected/identity;
+                    # only correct the non-extreme, non-NaN subset.
+                    simp_extreme_mask = simp_nan_mask | (simp_values > simh_threshold)
+                    target_mask = ~simp_extreme_mask
+ 
+                if target_mask.any():
+                    simp_target = simp_values[target_mask]
+                    simp_target_da = xr.DataArray(
+                        simp_target, dims="time",
+                        coords={"time": np.arange(len(simp_target))}, name=col,
+                    )
+                    corrected_target = adjust(
+                        method=method,
+                        obs=obs_da,
+                        simh=simh_fit_da,
+                        simp=simp_target_da,
+                        kind=kind,
+                        n_quantiles=n_quantiles,
+                    )
+                    simp_corrected[target_mask] = to_1d_array(corrected_target, col)
+                # Non-targeted entries (extreme, when not extrapolating; or
+                # originally-NaN) are left as their original value (NaN stays
+                # NaN, since simp_corrected started as a copy of simp_values).
+ 
+                return simp_corrected
+ 
+            # Correct the held-out (validation) forecasts.
+            X_val_corrected[col] = apply_correction(X_val[col].values)
+ 
+            # Correct the training forecasts against themselves, so the model
+            # trains on the same corrected distribution it will see at inference.
+            X_train_corrected[col] = apply_correction(X_train[col].values)
+ 
+        return X_train_corrected, X_val_corrected
+ 
+
+    # def bias_correct_with_cmethods(X_train, X_val, y_train, method="quantile_mapping",
+    #                                 kind="+", n_quantiles=80):
+    #     """
+    #     Bias-correct each GCM forecast column in both X_train and X_val against
+    #     y_train (observations), using X_train's matching column as the historical
+    #     simulation (simh) in both cases. Correcting X_train too keeps the
+    #     distribution XGBoost trains on consistent with what it sees at inference
+    #     time on X_val. Builds xarray.DataArrays directly from the pandas data,
+    #     since python-cmethods requires xarray.DataArray inputs rather than raw
+    #     pandas objects.
+    #     """
+    #     X_train_corrected = X_train.copy()
+    #     X_val_corrected = X_val.copy()
+
+    #     def to_1d_array(corrected, var_name):
+    #         """adjust() may return a DataArray or a Dataset depending on the
+    #         python-cmethods version installed; normalize either to a flat
+    #         numpy array."""
+    #         if isinstance(corrected, xr.Dataset):
+    #             if var_name in corrected.data_vars:
+    #                 corrected = corrected[var_name]
+    #             else:
+    #                 corrected = corrected[list(corrected.data_vars)[0]]
+    #         return np.asarray(corrected).ravel()
+
+    #     obs_da = xr.DataArray(
+    #         y_train.values, dims="time",
+    #         coords={"time": np.arange(len(y_train))}, name="obs_pr",
+    #     )
+
+    #     for col in get_forecast_columns(X_train):
+    #         simh_da = xr.DataArray(
+    #             X_train[col].values, dims="time",
+    #             coords={"time": np.arange(len(X_train))}, name=col,
+    #         )
+    #         simp_val_da = xr.DataArray(
+    #             X_val[col].values, dims="time",
+    #             coords={"time": np.arange(len(X_val))}, name=col,
+    #         )
+
+    #         # Correct the held-out (validation) forecasts.
+    #         corrected_val = adjust(
+    #             method=method,
+    #             obs=obs_da,
+    #             simh=simh_da,
+    #             simp=simp_val_da,
+    #             kind=kind,
+    #             n_quantiles=n_quantiles,
+    #         )
+    #         X_val_corrected[col] = to_1d_array(corrected_val, col)
+
+    #         # Correct the training forecasts against themselves, so the model
+    #         # trains on the same corrected distribution it will see at inference.
+    #         corrected_train = adjust(
+    #             method=method,
+    #             obs=obs_da,
+    #             simh=simh_da,
+    #             simp=simh_da,
+    #             kind=kind,
+    #             n_quantiles=n_quantiles,
+    #         )
+    #         X_train_corrected[col] = to_1d_array(corrected_train, col)
+
+    #     return X_train_corrected, X_val_corrected
+
     if is_yearly_split:
         logo = LeaveOneGroupOut()
         groups = dataset["year"]
@@ -234,6 +459,7 @@ def run_single_point_analysis(grid_point):
         xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
 
         y_pred = np.empty(0, dtype=float)
+        X_val_accum = []
 
         param_grid = {
             'learning_rate': [0.01, 0.05, 0.1, 0.2],
@@ -251,16 +477,57 @@ def run_single_point_analysis(grid_point):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
-            # TODO: Need to convert to NetCDF back and forth
+            # y_train is on the cbrt/log-transformed scale (applied to "pr"
+            # earlier), while the GCM forecast columns in X_train/X_val are
+            # still raw rainfall values. Invert the transform so obs and
+            # simh/simp are on the same scale before quantile mapping.
+            if args.feature == "log":
+                y_train_raw = np.exp(y_train) - 1
+            elif args.feature == "cbrt":
+                y_train_raw = np.power(y_train, 3)
+            else:
+                raise AssertionError()
 
-            # adjust(
-            #     method="quantile_mapping",
-            #     obs = y_train,
-            #     simh = X_train,
-            #     simp= X_val,
-            #     kind="+",
-            #     n_quantiles=80,
+            X_train_ecmwf_before = X_train["ecmwf_0_pr"].copy()
+            # X_train["ecmwf_0_pr"].plot.hist(
+            #     density=True, 
+            #     cumulative=True, 
+            #     histtype='step', 
+            #     bins=80, 
+            #     title="Approximated CDF (before)"
             # )
+            # plt.show()
+
+            # print("YTRAIN")
+            # print(y_train_raw.describe())
+            # print("XTRAIN")
+            # print(X_train["ecmwf_0_pr"].describe())
+
+            # X_train, X_val = bias_correct_with_cmethods(
+            #     X_train, X_val, y_train_raw,
+            #     method="quantile_mapping", kind="+", n_quantiles=80,
+            # )
+            X_train, X_val = bias_correct_with_cmethods(
+                X_train, X_val, y_train_raw,
+                method="quantile_mapping", kind="+", n_quantiles=80,
+                exclude_percentile=args.bc_exclude_percentile,
+                extrapolate_extremes=args.bc_extrapolate_extremes,
+            )
+            # pd.Series({"before": (X_train_ecmwf_before - y_train_raw.values).mean(), "after": (X_train["ecmwf_0_pr"] - y_train_raw.values).mean()}).plot.bar(title="ECMWF Mean Bias Before vs After"); plt.axhline(0, color='k', lw=1); plt.show()
+
+            # plt.scatter(X_train_ecmwf_before, X_train["ecmwf_0_pr"])
+
+            # plt.show()
+
+            # X_train["ecmwf_0_pr"].plot.hist(
+            #     density=True, 
+            #     cumulative=True, 
+            #     histtype='step', 
+            #     bins=80, 
+            #     title="Approximated CDF (after)"
+            # )
+            # plt.show()
+
 
             xgb_model = get_xgboost_model()
             clf_xgb_model = GridSearchCV(xgb_model, param_grid)
@@ -274,6 +541,7 @@ def run_single_point_analysis(grid_point):
 
             print(clf_xgb_model.best_estimator_.feature_importances_)
             y_pred = np.append(y_pred, y_val_pred)
+            X_val_accum.append(X_val)
             importance = clf_xgb_model.best_params_
 
         
@@ -317,14 +585,16 @@ def run_single_point_analysis(grid_point):
         y = np.power(y, 3)
 
     if is_yearly_split:
-        testing = X.copy()
+        X_val_all = pd.concat(X_val_accum)
+        print(X_val_all)
+        testing = X_val_all.copy()
         testing["XGBoost"] = y_pred
         testing["obs_pr"] = y
         if silo_radius > 0:
             # idx = 8 * (round(silo_radius / 0.05)) + 1
             idx = points # len(points[0])
             print(idx)
-            testing = testing[X["is_centre"] == 1]
+            testing = testing[testing["is_centre"] == 1]
             # testing = testing[(idx//2)::idx]  # Select only middle points
 
             print(testing)
@@ -368,8 +638,8 @@ if range_id == 0:
     lat_range = (-25, -21)
     lon_range = (142, 146)
 elif range_id == 1:
-    lat_range = (-29, -25)
-    lon_range = (150, 154)
+    lat_range = (-29, -28)
+    lon_range = (150, 151)
 elif range_id == 2:
     lat_range = (-20, -16)
     lon_range = (143, 147) 
@@ -377,6 +647,8 @@ elif range_id == 2:
 point_arg_list = []
 for lat in range(*lat_range):
     for lon in range(*lon_range):
+        if lat == -17 and lon == 146:
+            continue
         point_arg_list.append((np.float64(lat), np.float64(lon)))
         # print(f"Using {lat}, {lon}")
         # run_single_point_analysis((np.float64(lat), np.float64(lon)))
