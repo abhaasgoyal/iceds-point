@@ -22,7 +22,7 @@ from sklearn.model_selection import (
 from xarray import DataArray, Dataset
 from xgboost import plot_importance
 
-from bias_correction import bias_correct_with_cmethods
+from bias_correction import bias_correct_series, bias_correct_with_cmethods
 from feature_engineering import FeatureEngineering, prepare_dataset
 
 parser = argparse.ArgumentParser(
@@ -68,23 +68,10 @@ def run_single_point_analysis(grid_point):
     gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc")
     # gcms_forecast = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new_forecast.nc")
 
-    # gcms = xr.concat([gcms, gcms_forecast], dim="time")
+
+    # gcms = xr.concat([gcms, gcms_forecast], compat="no_conflicts", join="outer", dim="time")
     # print(gcms)
     # print("Here")
-
-    # Initial Analysis
-    def single_point_data_analysis():
- 
-        fig, axes = plt.subplots(nrows=1, ncols=3, figsize = (15,5),sharey=True)
-        fig.suptitle("Comparison of Observed Precipitation values vs GCMs for region (150.0, -29.0)")
-        for idx, model in enumerate([gcms.sel(model="ecmwf", lead=0), gcms.sel(model="access", lead=0), gcms.sel(model="ukmo", lead=0)]):
-
-            scatter_plot_data = xr.merge([model, silo.rename_vars({"pr" : "obs_pr"})], compat="override")
-            ax = sns.regplot(scatter_plot_data.to_dataframe(), x="pr", y="obs_pr", ax=axes[idx])
-            ax.axline((0, 0), slope=1, color='k', ls='--')
-            plt.legend(loc='upper left', labels=[None, "Regression Line Fit", None, "Slope 1"])
-            ax.grid(True, axis='both', ls=':')
-            ax.set_title(model.model.values)
 
     def construct_circle(origin, n_points, radius, base_angle=0.0, include_origin=False):
 
@@ -105,22 +92,9 @@ def run_single_point_analysis(grid_point):
         points_1 = construct_circle(grid_point, n_points_inner_circle, radius_inner_circle, include_origin=True)
         points_2 = construct_circle(grid_point, n_points_outer_circle, radius_outer_circle, base_angle=np.pi / 6)
         points = (points_1[0] + points_2[0], points_1[1] + points_2[1])
-        # points = points_1
         print(points[0])
         print(points[1])
         print(len(points[0]))
-        # lat_da = xr.DataArray(points[0], dims="point")
-        # lon_da = xr.DataArray(points[1], dims="point")
-
-        def select_circular_points(dataset, points):
-            lat_da = xr.DataArray(points[0], dims="point")
-            lon_da = xr.DataArray(points[1], dims="point")
-            dataset = dataset.sel(latitude=lat_da, longitude=lon_da, method="nearest")
-            print(dataset.latitude.values)
-            print(dataset.longitude.values)
-            dataset = dataset.assign_coords(point=pd.MultiIndex.from_arrays([dataset.latitude.values, dataset.longitude.values], names=["latitude", "longitude"])).unstack("point")
-            dataset = dataset.sortby(["latitude", "longitude"])
-            return dataset
 
         def dataset_within_radius(dataset, grid_point, radius, max_radius=0.40, cutoff_points=81):
 
@@ -151,18 +125,12 @@ def run_single_point_analysis(grid_point):
         silo["longitude"] = silo["longitude"].round(decimals=2)
         silo["latitude"] = silo["latitude"].round(decimals=2)
         
-        # Option 1
-
         cutoff_points = 81
         silo, points = dataset_within_radius(silo, grid_point, model_radius, cutoff_points)
         # gcms = dataset_within_radius(gcms, grid_point, model_radius)
 
         mask = silo["pr"].notnull()
         gcms = gcms.where(mask, drop=True)
-
-        # Option 2
-        # silo = select_circular_points(silo, points)
-        # gcms = select_circular_points(gcms, points)
 
     # single_point_data_analysis()
     # plt.show()
@@ -263,6 +231,7 @@ def run_single_point_analysis(grid_point):
             # )
             # plt.show()
 
+            print("Doing bias correction")
             X_train, X_val = bias_correct_with_cmethods(
                 X_train, X_val, y_train_raw,
                 method="quantile_mapping", kind="+", n_quantiles=80,
@@ -270,12 +239,6 @@ def run_single_point_analysis(grid_point):
                 extrapolate_extremes=args.bc_extrapolate_extremes,
             )
 
-            if args.feature == "log":
-                dataset["pr"] = np.log(dataset["pr"] + 1)
-            elif args.feature == "cbrt":
-                dataset["pr"] = np.cbrt(dataset["pr"])
-            else:
-                raise AssertionError()
             #-------
             # Comparison of bias-correction behaviour across several
             # exclude_percentile values, holding extrapolate_extremes fixed
@@ -283,55 +246,55 @@ def run_single_point_analysis(grid_point):
             # the actual X_train/X_val used for training above already come
             # from the single bias_correct_with_cmethods call using
             # args.bc_exclude_percentile.
-            bc_percentiles_to_compare = [85.0, 90.0, 95.0, 100.0]
-            bc_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+            # bc_percentiles_to_compare = [85.0, 90.0, 95.0, 100.0]
+            # bc_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
 
-            X_train_pctl_results = {}
-            for pctl in bc_percentiles_to_compare:
-                X_train_pctl, _ = bias_correct_with_cmethods(
-                    X_train, X_val, y_train_raw,
-                    method="quantile_mapping", kind="+", n_quantiles=80,
-                    exclude_percentile=pctl,
-                    extrapolate_extremes=args.bc_extrapolate_extremes,
-                )
-                X_train_pctl_results[pctl] = X_train_pctl
+            # X_train_pctl_results = {}
+            # for pctl in bc_percentiles_to_compare:
+            #     X_train_pctl, _ = bias_correct_with_cmethods(
+            #         X_train, X_val, y_train_raw,
+            #         method="quantile_mapping", kind="+", n_quantiles=80,
+            #         exclude_percentile=pctl,
+            #         extrapolate_extremes=args.bc_extrapolate_extremes,
+            #     )
+            #     X_train_pctl_results[pctl] = X_train_pctl
 
-            # Bar chart: mean bias before vs. after, grouped by percentile.
-            bias_before = (X_train_ecmwf_before - y_train_raw.values).mean()
-            bias_after_by_pctl = {
-                f"after (p={pctl:.0f})": (X_train_pctl_results[pctl]["ecmwf_0_pr"] - y_train_raw.values).mean()
-                for pctl in bc_percentiles_to_compare
-            }
-            bias_series = pd.Series({"before": bias_before, **bias_after_by_pctl})
-            ax_bar = bias_series.plot.bar(
-                title="ECMWF Mean Bias Before vs After (by Exclude Percentile) Point: (-29.0, 150)",
-                color=["gray"] + bc_colors,
-            )
-            ax_bar.axhline(0, color='k', lw=1)
-            ax_bar.set_ylabel("Mean Bias")
-            plt.tight_layout()
-            plt.show()
+            # # Bar chart: mean bias before vs. after, grouped by percentile.
+            # bias_before = (X_train_ecmwf_before - y_train_raw.values).mean()
+            # bias_after_by_pctl = {
+            #     f"after (p={pctl:.0f})": (X_train_pctl_results[pctl]["ecmwf_0_pr"] - y_train_raw.values).mean()
+            #     for pctl in bc_percentiles_to_compare
+            # }
+            # bias_series = pd.Series({"before": bias_before, **bias_after_by_pctl})
+            # ax_bar = bias_series.plot.bar(
+            #     title="ECMWF Mean Bias Before vs After (by Exclude Percentile) Point: (-29.0, 150)",
+            #     color=["gray"] + bc_colors,
+            # )
+            # ax_bar.axhline(0, color='k', lw=1)
+            # ax_bar.set_ylabel("Mean Bias")
+            # plt.tight_layout()
+            # plt.show()
 
-            # Scatter: before vs. after correction, one color per percentile.
-            _, ax_scatter = plt.subplots(figsize=(7, 7))
-            ax_scatter.scatter(
-                X_train_ecmwf_before, X_train_ecmwf_before,
-                s=10, alpha=0.6, color="gray", label="uncorrected",
-            )
-            for pctl, color in zip(bc_percentiles_to_compare, bc_colors):
-                ax_scatter.scatter(
-                    X_train_ecmwf_before, X_train_pctl_results[pctl]["ecmwf_0_pr"],
-                    s=10, alpha=0.6, color=color, label=f"p={pctl:.0f}",
-                )
-            lo = min(ax_scatter.get_xlim()[0], ax_scatter.get_ylim()[0])
-            hi = max(ax_scatter.get_xlim()[1], ax_scatter.get_ylim()[1])
-            ax_scatter.plot([lo, hi], [lo, hi], 'k--', lw=1, label="1:1")
-            ax_scatter.set_xlabel("Before")
-            ax_scatter.set_ylabel("After")
-            ax_scatter.set_title("ECMWF Before vs After Correction (by Exclude Percentile) Point: (-29.0, 150.0)")
-            ax_scatter.legend()
-            plt.tight_layout()
-            plt.show()
+            # # Scatter: before vs. after correction, one color per percentile.
+            # _, ax_scatter = plt.subplots(figsize=(7, 7))
+            # ax_scatter.scatter(
+            #     X_train_ecmwf_before, X_train_ecmwf_before,
+            #     s=10, alpha=0.6, color="gray", label="uncorrected",
+            # )
+            # for pctl, color in zip(bc_percentiles_to_compare, bc_colors):
+            #     ax_scatter.scatter(
+            #         X_train_ecmwf_before, X_train_pctl_results[pctl]["ecmwf_0_pr"],
+            #         s=10, alpha=0.6, color=color, label=f"p={pctl:.0f}",
+            #     )
+            # lo = min(ax_scatter.get_xlim()[0], ax_scatter.get_ylim()[0])
+            # hi = max(ax_scatter.get_xlim()[1], ax_scatter.get_ylim()[1])
+            # ax_scatter.plot([lo, hi], [lo, hi], 'k--', lw=1, label="1:1")
+            # ax_scatter.set_xlabel("Before")
+            # ax_scatter.set_ylabel("After")
+            # ax_scatter.set_title("ECMWF Before vs After Correction (by Exclude Percentile) Point: (-29.0, 150.0)")
+            # ax_scatter.legend()
+            # plt.tight_layout()
+            # plt.show()
             # #----------------
             # pd.Series({"before": (X_train_ecmwf_before - y_train_raw.values).mean(), "after": (X_train["ecmwf_0_pr"] - y_train_raw.values).mean()}).plot.bar(title="ECMWF Mean Bias Before vs After"); plt.axhline(0, color='k', lw=1); plt.show()
 
@@ -347,8 +310,6 @@ def run_single_point_analysis(grid_point):
             #     title="Approximated CDF (after)"
             # )
             # plt.show()
-            import sys
-            sys.exit(1)
 
 
             xgb_model = get_xgboost_model()
@@ -357,12 +318,39 @@ def run_single_point_analysis(grid_point):
             clf_xgb_model.fit(X_train.drop(columns=["year", "is_centre"]), y_train) # Uses 5-fold cross validation
 
             y_val_pred = clf_xgb_model.predict(X_val.drop(columns=["year", "is_centre"]))
+            y_train_pred = clf_xgb_model.predict(X_train.drop(columns=["year", "is_centre"]))
+
+
+            # Bias correct on XGBoost predictions
+            if args.feature == "log":
+                y_train_pred_raw = np.exp(y_train_pred) - 1
+                y_val_pred_raw = np.exp(y_val_pred) - 1
+            elif args.feature == "cbrt":
+                y_train_pred_raw = np.power(y_train_pred, 3)
+                y_val_pred_raw = np.power(y_val_pred, 3)
+            else:
+                raise AssertionError()
+ 
+            _, y_val_pred_raw_corrected = bias_correct_series(
+                y_train_pred_raw, y_val_pred_raw, y_train_raw,
+                method="quantile_mapping", kind="+", n_quantiles=80,
+                exclude_percentile=args.bc_exclude_percentile,
+                extrapolate_extremes=args.bc_extrapolate_extremes,
+            )
+ 
+            if args.feature == "log":
+                y_val_pred = np.log(y_val_pred_raw_corrected + 1)
+            elif args.feature == "cbrt":
+                y_val_pred = np.cbrt(y_val_pred_raw_corrected)
+
+
             # if silo_radius > 0.0:
             #     y_val_pred = y_val_pred[4::9]  # Select only middle points
             #     print(len(y_val_pred))
 
             print(clf_xgb_model.best_estimator_.feature_importances_)
             y_pred = np.append(y_pred, y_val_pred)
+            print(X_val.describe())
             X_val_accum.append(X_val)
             importance = clf_xgb_model.best_params_
 
@@ -453,7 +441,19 @@ def run_single_point_analysis(grid_point):
     for model, rmse in model_rmse.items():
         print(f"{model} RMSE: {rmse}")
 
-    return [grid_point, model_mae["XGBoost"], model_mae["ecmwf"], model_mae["ukmo"], model_mae["access"], model_rmse["XGBoost"], model_rmse["ecmwf"], model_rmse["ukmo"], model_rmse["access"]]
+    # Bias = mean(forecast - observed): positive means the model
+    # over-predicts on average, negative means it under-predicts.
+    model_bias = {
+        "XGBoost" : np.mean(testing_temp["XGBoost"] - testing_temp["obs_pr"]),
+        "ecmwf" : np.mean(testing_temp[f"ecmwf_{args.lead_time - 1}_pr"] - testing_temp["obs_pr"]),
+        "ukmo" : np.mean(testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask] - testing["obs_pr"][ukmo_mask]),
+        "access" : np.mean(testing_temp[f"access_{args.lead_time - 1}_pr"] - testing_temp["obs_pr"])
+    }
+
+    for model, bias in model_bias.items():
+        print(f"{model} Bias: {bias}")
+
+    return [grid_point, model_mae["XGBoost"], model_mae["ecmwf"], model_mae["ukmo"], model_mae["access"], model_rmse["XGBoost"], model_rmse["ecmwf"], model_rmse["ukmo"], model_rmse["access"], model_bias["XGBoost"], model_bias["ecmwf"], model_bias["ukmo"], model_bias["access"]]
 
 
 if range_id == 0:
@@ -517,8 +517,8 @@ with ProcessPoolExecutor() as executor:
 rows = list(results)
 
 
-headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse"]
-with open(f"/scratch/tm70/ag9761/iceds_datasets/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
+headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse", "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
+with open(f"/scratch/tm70/ag9761/iceds_datasets/bias_analysis/after/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(headers)   # Writes a single row (header)
     writer.writerows(rows)     # Writes multiple data rows at once
