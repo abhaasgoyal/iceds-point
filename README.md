@@ -1,3 +1,27 @@
+# Pipeline
+
+Scripts in the order they are run. `feature_engineering.py` and `bias_correction.py` are imported by the training scripts rather than run directly.
+
+| # | Script | Purpose |
+|---|--------|---------|
+| 1 | `download_datasets.py` | Downloads raw ECMWF/UKMO/BoM seasonal forecast NetCDFs from the CDS API, one file per model per region. download SILO observations|
+| 2 | `preprocess-cds.py` | Converts each raw model file to climpred's `valid_time`+`lead` layout (mm/day, ensemble median), then merges the three models into `preprocessed_dataset_{region}_new.nc`. |
+| – | `feature_engineering.py` | Library. Builds one feature column per model/lead (`ecmwf_0_pr`, `ukmo_1_pr`, …) and assembles the training frame: merge with SILO, wet/dry season filter, cbrt or log transform of rainfall. |
+| – | `bias_correction.py` | Library. Quantile-maps each GCM forecast column onto the observations, fitting only on non-extreme obs/simh pairs and optionally extrapolating the fit onto extremes. |
+| 3 | `ensemble_xgboost.py` | Trains XGBoost on hexagonal grid points around each location. Lead 0 only. |
+| 3 | `ensemble_xgboost_nearest.py` | As above but using every point within 0.25° of the grid point, with `--region` / `--lead_time` / `--feature` / `--season` options. Best-performing variant. |
+| 3 | `ensemble_xgboost_nearest_forecast.py` | `ensemble_xgboost_nearest.py` extended to also read the live forecast dataset alongside the hindcast. |
+| 4 | `plot_heatmap.py` | Seaborn grid heatmaps of MAE/RMSE for all four models, plus an XGBoost − ECMWF difference plot. One figure per region. |
+| 4 | `plot_heatmap_cartopy.py` | The same metrics drawn on a Cartopy map with the Queensland boundary and coastlines, all regions on one figure. |
+
+The three step-3 scripts are alternatives, not a sequence. Each writes `output_region{R}_lead{L}_feature{F}_perc{P}.csv`, which the step-4 plotting scripts read.
+
+## Known blockers
+
+- `preprocess-cds.py`: `main()` currently only calls `merge_datasets()`; the `process_dataset()` loop above it is commented out and must be run at least once first.
+- `ensemble_xgboost_nearest.py`: imports `bias_correct_series` from `bias_correction.py`, which no longer defines it — the script fails at import.
+- `ensemble_xgboost_nearest_forecast.py`: a leftover `exit(1)` halts the run before training starts, and the forecast years are dropped by the `1993-2016` time slice in `prepare_dataset()` before they can be used.
+
 # Data Preprocessing
 
 Original Datasets
@@ -27,6 +51,7 @@ Now for getting additional data points to train on aside from the single locatio
 Current results (best-performing as of now) are generated from `ensemble_xgboost_nearest.py` 
 
 [1] https://confluence.ecmwf.int/spaces/CKB/pages/56661594/Does+downloading+data+at+higher+resolution+improve+the+output
+
 
 TODO: Look into the results for the following (quoting Barry):
 ```
