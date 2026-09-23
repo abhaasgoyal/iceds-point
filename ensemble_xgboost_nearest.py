@@ -46,6 +46,10 @@ parser.add_argument('--forecast', action='store_true',
 
 
 # Bias correction options
+parser.add_argument('--no_bias_correction', action='store_true',
+                     help="If set, skip all bias correction: neither the GCM "
+                          "forecast features nor the XGBoost predictions are "
+                          "quantile-mapped.")
 parser.add_argument('--bc_exclude_percentile', default=95.0, type=float,
                      help="Percentile (on obs and simh separately) above which values "
                           "are treated as 'extreme' and excluded from the quantile "
@@ -74,6 +78,24 @@ n_points_inner_circle = 6
 radius_inner_circle = 0.6
 n_points_outer_circle = 6
 radius_outer_circle = 1.039
+
+
+def inverse_transform(values):
+    """Undo the cbrt/log feature transform to get back raw rainfall."""
+    if args.feature == "log":
+        return np.exp(values) - 1
+    elif args.feature == "cbrt":
+        return np.power(values, 3)
+    raise AssertionError()
+
+
+def forward_transform(values):
+    """Apply the cbrt/log feature transform to raw rainfall."""
+    if args.feature == "log":
+        return np.log(values + 1)
+    elif args.feature == "cbrt":
+        return np.cbrt(values)
+    raise AssertionError()
 
 
 def run_single_point_analysis(grid_point):
@@ -159,7 +181,7 @@ def run_single_point_analysis(grid_point):
     feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time)
     # feature_dataset.enable_wet_season_feature()
     # feature_dataset.enable_climate_classification()
-    # feature_dataset.select_lead_time(args.lead_time)
+    feature_dataset.select_lead_time(args.lead_time)
     feature_dataset.create_lead_time_features(["pr"])
     # feature_dataset.add_obs_window_time(period=1)
 
@@ -223,14 +245,8 @@ def run_single_point_analysis(grid_point):
             # earlier), while the GCM forecast columns in X_train/X_val are
             # still raw rainfall values. Invert the transform so obs and
             # simh/simp are on the same scale before quantile mapping.
-            if args.feature == "log":
-                y_train_raw = np.exp(y_train) - 1
-            elif args.feature == "cbrt":
-                y_train_raw = np.power(y_train, 3)
-            else:
-                raise AssertionError()
+            y_train_raw = inverse_transform(y_train)
 
-            X_train_ecmwf_before = X_train["ecmwf_0_pr"].copy()
             # X_train["ecmwf_0_pr"].plot.hist(
             #     density=True,
             #     cumulative=True,
@@ -240,13 +256,14 @@ def run_single_point_analysis(grid_point):
             # )
             # plt.show()
 
-            print("Doing bias correction")
-            X_train, X_val = bias_correct_with_cmethods(
-                X_train, X_val, y_train_raw,
-                method="quantile_mapping", kind="+", n_quantiles=80,
-                exclude_percentile=args.bc_exclude_percentile,
-                extrapolate_extremes=args.bc_extrapolate_extremes,
-            )
+            if not args.no_bias_correction:
+                print("Doing bias correction")
+                X_train, X_val = bias_correct_with_cmethods(
+                    X_train, X_val, y_train_raw,
+                    method="quantile_mapping", kind="+", n_quantiles=80,
+                    exclude_percentile=args.bc_exclude_percentile,
+                    extrapolate_extremes=args.bc_extrapolate_extremes,
+                )
 
 
             xgb_model = get_xgboost_model()
@@ -259,26 +276,18 @@ def run_single_point_analysis(grid_point):
 
 
             # Bias correct on XGBoost predictions
-            if args.feature == "log":
-                y_train_pred_raw = np.exp(y_train_pred) - 1
-                y_val_pred_raw = np.exp(y_val_pred) - 1
-            elif args.feature == "cbrt":
-                y_train_pred_raw = np.power(y_train_pred, 3)
-                y_val_pred_raw = np.power(y_val_pred, 3)
-            else:
-                raise AssertionError()
+            if not args.no_bias_correction:
+                y_train_pred_raw = inverse_transform(y_train_pred)
+                y_val_pred_raw = inverse_transform(y_val_pred)
 
-            _, y_val_pred_raw_corrected = bias_correct_series(
-                y_train_pred_raw, y_val_pred_raw, y_train_raw,
-                method="quantile_mapping", kind="+", n_quantiles=80,
-                exclude_percentile=args.bc_exclude_percentile,
-                extrapolate_extremes=args.bc_extrapolate_extremes,
-            )
+                _, y_val_pred_raw_corrected = bias_correct_series(
+                    y_train_pred_raw, y_val_pred_raw, y_train_raw,
+                    method="quantile_mapping", kind="+", n_quantiles=80,
+                    exclude_percentile=args.bc_exclude_percentile,
+                    extrapolate_extremes=args.bc_extrapolate_extremes,
+                )
 
-            if args.feature == "log":
-                y_val_pred = np.log(y_val_pred_raw_corrected + 1)
-            elif args.feature == "cbrt":
-                y_val_pred = np.cbrt(y_val_pred_raw_corrected)
+                y_val_pred = forward_transform(y_val_pred_raw_corrected)
 
 
             y_pred = y_val_pred
@@ -307,14 +316,8 @@ def run_single_point_analysis(grid_point):
                 # earlier), while the GCM forecast columns in X_train/X_val are
                 # still raw rainfall values. Invert the transform so obs and
                 # simh/simp are on the same scale before quantile mapping.
-                if args.feature == "log":
-                    y_train_raw = np.exp(y_train) - 1
-                elif args.feature == "cbrt":
-                    y_train_raw = np.power(y_train, 3)
-                else:
-                    raise AssertionError()
+                y_train_raw = inverse_transform(y_train)
 
-                X_train_ecmwf_before = X_train["ecmwf_0_pr"].copy()
                 # X_train["ecmwf_0_pr"].plot.hist(
                 #     density=True,
                 #     cumulative=True,
@@ -324,13 +327,14 @@ def run_single_point_analysis(grid_point):
                 # )
                 # plt.show()
 
-                print("Doing bias correction")
-                X_train, X_val = bias_correct_with_cmethods(
-                    X_train, X_val, y_train_raw,
-                    method="quantile_mapping", kind="+", n_quantiles=80,
-                    exclude_percentile=args.bc_exclude_percentile,
-                    extrapolate_extremes=args.bc_extrapolate_extremes,
-                )
+                if not args.no_bias_correction:
+                    print("Doing bias correction")
+                    X_train, X_val = bias_correct_with_cmethods(
+                        X_train, X_val, y_train_raw,
+                        method="quantile_mapping", kind="+", n_quantiles=80,
+                        exclude_percentile=args.bc_exclude_percentile,
+                        extrapolate_extremes=args.bc_extrapolate_extremes,
+                    )
 
                 xgb_model = get_xgboost_model()
                 clf_xgb_model = GridSearchCV(xgb_model, param_grid)
@@ -342,26 +346,18 @@ def run_single_point_analysis(grid_point):
 
 
                 # Bias correct on XGBoost predictions
-                if args.feature == "log":
-                    y_train_pred_raw = np.exp(y_train_pred) - 1
-                    y_val_pred_raw = np.exp(y_val_pred) - 1
-                elif args.feature == "cbrt":
-                    y_train_pred_raw = np.power(y_train_pred, 3)
-                    y_val_pred_raw = np.power(y_val_pred, 3)
-                else:
-                    raise AssertionError()
+                if not args.no_bias_correction:
+                    y_train_pred_raw = inverse_transform(y_train_pred)
+                    y_val_pred_raw = inverse_transform(y_val_pred)
 
-                _, y_val_pred_raw_corrected = bias_correct_series(
-                    y_train_pred_raw, y_val_pred_raw, y_train_raw,
-                    method="quantile_mapping", kind="+", n_quantiles=80,
-                    exclude_percentile=args.bc_exclude_percentile,
-                    extrapolate_extremes=args.bc_extrapolate_extremes,
-                )
+                    _, y_val_pred_raw_corrected = bias_correct_series(
+                        y_train_pred_raw, y_val_pred_raw, y_train_raw,
+                        method="quantile_mapping", kind="+", n_quantiles=80,
+                        exclude_percentile=args.bc_exclude_percentile,
+                        extrapolate_extremes=args.bc_extrapolate_extremes,
+                    )
 
-                if args.feature == "log":
-                    y_val_pred = np.log(y_val_pred_raw_corrected + 1)
-                elif args.feature == "cbrt":
-                    y_val_pred = np.cbrt(y_val_pred_raw_corrected)
+                    y_val_pred = forward_transform(y_val_pred_raw_corrected)
 
 
                 # if silo_radius > 0.0:
@@ -393,7 +389,7 @@ def run_single_point_analysis(grid_point):
     def single_point_data_analysis(data):
 
         fig, axes = plt.subplots(nrows=2, ncols=2, figsize = (10,10),sharey=True)
-        fig.suptitle("Testing of Observed Precipitation values vs GCMs for region (150.0, -29.0)")
+        fig.suptitle("Lead 1: Testing of Observed Precipitation values vs GCMs for region (150.0, -29.0)")
         for idx, model in enumerate(["ecmwf_0_pr", "ukmo_0_pr", "access_0_pr", "XGBoost"]):
         # for idx, model in enumerate(["ecmwf_0_pr", "access_0_pr", "XGBoost"]):
             i = idx // 2
@@ -407,12 +403,8 @@ def run_single_point_analysis(grid_point):
             ax.set_title(model)
         plt.show()
 
-    if args.feature == "log":
-        y_pred = np.exp(y_pred) - 1
-        y = np.exp(y) - 1
-    elif args.feature == "cbrt":
-        y_pred = np.power(y_pred, 3)
-        y = np.power(y, 3)
+    y_pred = inverse_transform(y_pred)
+    y = inverse_transform(y)
 
     if is_yearly_split:
         if args.forecast:
@@ -539,12 +531,15 @@ with ProcessPoolExecutor() as executor:
 
 rows = list(results)
 
-
 headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse", "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
 if args.forecast:
     output_dir = "/scratch/tm70/ag9761/iceds_datasets/forecast"
 else:
-    output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
+    if args.no_bias_correction:
+        print("no bias correction")
+        output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/before"
+    else:
+        output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
 
 with open(f"{output_dir}/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
