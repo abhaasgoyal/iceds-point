@@ -134,8 +134,8 @@ def merge_datasets(range_id: int, is_forecast: bool = False) -> None:
  
  
 def main():
-    # for dataset_name in dataset_names:
-    #     process_dataset(dataset_name, range_id, is_forecast)
+    for dataset_name in dataset_names:
+        process_dataset(dataset_name, range_id, is_forecast)
  
     merge_datasets(range_id, is_forecast)
 

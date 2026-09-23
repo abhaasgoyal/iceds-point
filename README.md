@@ -18,12 +18,6 @@ Scripts in the order they are run. `feature_engineering.py` and `bias_correction
 
 The three step-3 scripts are alternatives, not a sequence. Each writes `output_region{R}_lead{L}_feature{F}_perc{P}.csv`, which the step-4 plotting scripts read.
 
-## Known blockers
-
-- `preprocess-cds.py`: `main()` currently only calls `merge_datasets()`; the `process_dataset()` loop above it is commented out and must be run at least once first.
-- `ensemble_xgboost_nearest.py`: imports `bias_correct_series` from `bias_correction.py`, which no longer defines it — the script fails at import.
-- `ensemble_xgboost_nearest_forecast.py`: a leftover `exit(1)` halts the run before training starts, and the forecast years are dropped by the `1993-2016` time slice in `prepare_dataset()` before they can be used.
-
 # Data Preprocessing
 
 Original Datasets
