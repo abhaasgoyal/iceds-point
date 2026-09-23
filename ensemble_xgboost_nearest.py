@@ -33,6 +33,16 @@ parser.add_argument('-r', '--region', default=1, type=int, choices=list(range(4)
 parser.add_argument('-l', '--lead_time', default=1, type=int, choices=list(range(1, 7)))
 parser.add_argument('-f', '--feature', default="cbrt", type=str, choices=["cbrt", "log"])
 parser.add_argument('-s', '--season', default="wet", type=str, choices=["wet", "dry"])
+parser.add_argument('--forecast', action='store_true',
+                     help="If set, run in forecast mode: use the forecast-extended "
+                          "datasets, skip the 2025/2026 year filter, evaluate with a "
+                          "single train/val split on 2025-2026, and write output under "
+                          "the 'forecast' output directory. If not set (default), run "
+                          "in hindcast mode: use the hindcast datasets, drop 2025/2026 "
+                          "from training, evaluate with leave-one-year-out cross "
+                          "validation (with bias correction applied to predictions "
+                          "too), and write output under the 'hindcast' output "
+                          "directory.")
 
 
 # Bias correction options
@@ -49,6 +59,10 @@ args = parser.parse_args()
 
 rows = []
 range_id = args.region
+if args.forecast:
+    print("In forecast mode:")
+else:
+    print("In hindcast mode:")
 print(f"Region: {range_id}")
 
 # Config options
@@ -64,21 +78,20 @@ radius_outer_circle = 1.039
 
 def run_single_point_analysis(grid_point):
     # Datasets
-    silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed.nc")
-    gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc")
-    # gcms_forecast = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new_forecast.nc")
+    if args.forecast:
+        silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed_forecast.nc")
+        gcms = xr.open_mfdataset([f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc", f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new_forecast.nc"], chunks="auto", compat="override", coords="minimal")
+    else:
+        silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed.nc")
+        gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc")
 
-
-    # gcms = xr.concat([gcms, gcms_forecast], compat="no_conflicts", join="outer", dim="time")
-    # print(gcms)
-    # print("Here")
 
     def construct_circle(origin, n_points, radius, base_angle=0.0, include_origin=False):
 
         def get_circular_point(angle):
             print(angle)
             return (round(origin[0] + radius * xr.ufuncs.cos(angle), 2), round(origin[1] + radius * xr.ufuncs.sin(angle), 2))
-    
+
         coords = [get_circular_point(base_angle + 2 * i * np.pi / n_points_inner_circle) for i in range(n_points)]
         if include_origin:
             coords.insert(len(coords) // 2, origin)
@@ -100,7 +113,7 @@ def run_single_point_analysis(grid_point):
 
             # Incrementally increase radius until hit minimum number of poitns
             while radius <= max_radius:
-        
+
                 dist = np.hypot(dataset.latitude - grid_point[0], dataset.longitude - grid_point[1])
                 mask = xr.ufuncs.bitwise_or(dist <= radius, np.isclose(dist, radius))
 
@@ -116,7 +129,7 @@ def run_single_point_analysis(grid_point):
 
             if points < cutoff_points:
                 raise AssertionError(f"n_points: {points} Cutoff Points: {cutoff_points} Location: {grid_point}")
-                
+
             return selected, points
 
 
@@ -124,7 +137,7 @@ def run_single_point_analysis(grid_point):
         gcms["longitude"] = gcms["longitude"].round(decimals=2)
         silo["longitude"] = silo["longitude"].round(decimals=2)
         silo["latitude"] = silo["latitude"].round(decimals=2)
-        
+
         cutoff_points = 81
         silo, points = dataset_within_radius(silo, grid_point, model_radius, cutoff_points)
         # gcms = dataset_within_radius(gcms, grid_point, model_radius)
@@ -143,23 +156,21 @@ def run_single_point_analysis(grid_point):
     # plt.clf()
 
 
-    feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time) 
+    feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time)
     # feature_dataset.enable_wet_season_feature()
     # feature_dataset.enable_climate_classification()
     # feature_dataset.select_lead_time(args.lead_time)
     feature_dataset.create_lead_time_features(["pr"])
     # feature_dataset.add_obs_window_time(period=1)
 
-    dataset = prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args)
-    
-    dataset = dataset[~dataset['year'].isin([2025, 2026])]
+    dataset = prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_forecast=args.forecast)
 
     is_yearly_split = True
     X = dataset.drop(columns=["pr"])
     y = dataset["pr"]
 
     def get_xgboost_model():
-        xgb_model = xgb.XGBRegressor(objective='reg:squarederror', eval_metric= 'mae', max_depth=5, eta=0.1, 
+        xgb_model = xgb.XGBRegressor(objective='reg:squarederror', eval_metric= 'mae', max_depth=5, eta=0.1,
                                 subsample=0.7, colsample_bytree=0.7)
 
         return xgb_model
@@ -186,29 +197,27 @@ def run_single_point_analysis(grid_point):
         return xgb_model.predict(X_test)
 
     if is_yearly_split:
-        logo = LeaveOneGroupOut()
-        groups = dataset["year"]
-    
-        xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
-
-        y_pred = np.empty(0, dtype=float)
-        X_val_accum = []
 
         param_grid = {
             'learning_rate': [0.01, 0.05, 0.1, 0.2],
             'max_depth': [2],
             'min_child_weight': [1, 3],
             'subsample': [0.2, 0.3, 0.4, 0.7],
-            'colsample_bytree': [0.7], 
+            'colsample_bytree': [0.7],
             'reg_alpha': [1.0],          # L1 regularization
             'reg_lambda': [5.0],         # L2 regularization (increase this)
             'eta': [0.1],
             'n_estimators': [5, 10, 20, 30, 50]
         }
 
-        for train_idx, val_idx in logo.split(X, y, groups):
-            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        if args.forecast:
+
+            val_mask = dataset["year"].isin([2025, 2026])
+            X_train, X_val = X[~val_mask], X[val_mask]
+            y_train, y_val = y[~val_mask], y[val_mask]
+            print(X_val)
+
+            xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
 
             # y_train is on the cbrt/log-transformed scale (applied to "pr"
             # earlier), while the GCM forecast columns in X_train/X_val are
@@ -223,10 +232,10 @@ def run_single_point_analysis(grid_point):
 
             X_train_ecmwf_before = X_train["ecmwf_0_pr"].copy()
             # X_train["ecmwf_0_pr"].plot.hist(
-            #     density=True, 
-            #     cumulative=True, 
-            #     histtype='step', 
-            #     bins=80, 
+            #     density=True,
+            #     cumulative=True,
+            #     histtype='step',
+            #     bins=80,
             #     title="Approximated CDF (before)"
             # )
             # plt.show()
@@ -238,78 +247,6 @@ def run_single_point_analysis(grid_point):
                 exclude_percentile=args.bc_exclude_percentile,
                 extrapolate_extremes=args.bc_extrapolate_extremes,
             )
-
-            #-------
-            # Comparison of bias-correction behaviour across several
-            # exclude_percentile values, holding extrapolate_extremes fixed
-            # at whatever was passed on the CLI. This is purely diagnostic -
-            # the actual X_train/X_val used for training above already come
-            # from the single bias_correct_with_cmethods call using
-            # args.bc_exclude_percentile.
-            # bc_percentiles_to_compare = [85.0, 90.0, 95.0, 100.0]
-            # bc_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
-
-            # X_train_pctl_results = {}
-            # for pctl in bc_percentiles_to_compare:
-            #     X_train_pctl, _ = bias_correct_with_cmethods(
-            #         X_train, X_val, y_train_raw,
-            #         method="quantile_mapping", kind="+", n_quantiles=80,
-            #         exclude_percentile=pctl,
-            #         extrapolate_extremes=args.bc_extrapolate_extremes,
-            #     )
-            #     X_train_pctl_results[pctl] = X_train_pctl
-
-            # # Bar chart: mean bias before vs. after, grouped by percentile.
-            # bias_before = (X_train_ecmwf_before - y_train_raw.values).mean()
-            # bias_after_by_pctl = {
-            #     f"after (p={pctl:.0f})": (X_train_pctl_results[pctl]["ecmwf_0_pr"] - y_train_raw.values).mean()
-            #     for pctl in bc_percentiles_to_compare
-            # }
-            # bias_series = pd.Series({"before": bias_before, **bias_after_by_pctl})
-            # ax_bar = bias_series.plot.bar(
-            #     title="ECMWF Mean Bias Before vs After (by Exclude Percentile) Point: (-29.0, 150)",
-            #     color=["gray"] + bc_colors,
-            # )
-            # ax_bar.axhline(0, color='k', lw=1)
-            # ax_bar.set_ylabel("Mean Bias")
-            # plt.tight_layout()
-            # plt.show()
-
-            # # Scatter: before vs. after correction, one color per percentile.
-            # _, ax_scatter = plt.subplots(figsize=(7, 7))
-            # ax_scatter.scatter(
-            #     X_train_ecmwf_before, X_train_ecmwf_before,
-            #     s=10, alpha=0.6, color="gray", label="uncorrected",
-            # )
-            # for pctl, color in zip(bc_percentiles_to_compare, bc_colors):
-            #     ax_scatter.scatter(
-            #         X_train_ecmwf_before, X_train_pctl_results[pctl]["ecmwf_0_pr"],
-            #         s=10, alpha=0.6, color=color, label=f"p={pctl:.0f}",
-            #     )
-            # lo = min(ax_scatter.get_xlim()[0], ax_scatter.get_ylim()[0])
-            # hi = max(ax_scatter.get_xlim()[1], ax_scatter.get_ylim()[1])
-            # ax_scatter.plot([lo, hi], [lo, hi], 'k--', lw=1, label="1:1")
-            # ax_scatter.set_xlabel("Before")
-            # ax_scatter.set_ylabel("After")
-            # ax_scatter.set_title("ECMWF Before vs After Correction (by Exclude Percentile) Point: (-29.0, 150.0)")
-            # ax_scatter.legend()
-            # plt.tight_layout()
-            # plt.show()
-            # #----------------
-            # pd.Series({"before": (X_train_ecmwf_before - y_train_raw.values).mean(), "after": (X_train["ecmwf_0_pr"] - y_train_raw.values).mean()}).plot.bar(title="ECMWF Mean Bias Before vs After"); plt.axhline(0, color='k', lw=1); plt.show()
-
-            # plt.scatter(X_train_ecmwf_before, X_train["ecmwf_0_pr"])
-
-            # plt.show()
-
-            # X_train["ecmwf_0_pr"].plot.hist(
-            #     density=True, 
-            #     cumulative=True, 
-            #     histtype='step', 
-            #     bins=80, 
-            #     title="Approximated CDF (after)"
-            # )
-            # plt.show()
 
 
             xgb_model = get_xgboost_model()
@@ -330,31 +267,114 @@ def run_single_point_analysis(grid_point):
                 y_val_pred_raw = np.power(y_val_pred, 3)
             else:
                 raise AssertionError()
- 
+
             _, y_val_pred_raw_corrected = bias_correct_series(
                 y_train_pred_raw, y_val_pred_raw, y_train_raw,
                 method="quantile_mapping", kind="+", n_quantiles=80,
                 exclude_percentile=args.bc_exclude_percentile,
                 extrapolate_extremes=args.bc_extrapolate_extremes,
             )
- 
+
             if args.feature == "log":
                 y_val_pred = np.log(y_val_pred_raw_corrected + 1)
             elif args.feature == "cbrt":
                 y_val_pred = np.cbrt(y_val_pred_raw_corrected)
 
 
+            y_pred = y_val_pred
             # if silo_radius > 0.0:
-            #     y_val_pred = y_val_pred[4::9]  # Select only middle points
-            #     print(len(y_val_pred))
+            #     y_pred = y_pred[4::9]  # Select only middle points
+            #     print(len(y_pred))
 
             print(clf_xgb_model.best_estimator_.feature_importances_)
-            y_pred = np.append(y_pred, y_val_pred)
             print(X_val.describe())
-            X_val_accum.append(X_val)
             importance = clf_xgb_model.best_params_
 
-        
+        else:
+            logo = LeaveOneGroupOut()
+            groups = dataset["year"]
+
+            xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
+
+            y_pred = np.empty(0, dtype=float)
+            X_val_accum = []
+
+            for train_idx, val_idx in logo.split(X, y, groups):
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+                # y_train is on the cbrt/log-transformed scale (applied to "pr"
+                # earlier), while the GCM forecast columns in X_train/X_val are
+                # still raw rainfall values. Invert the transform so obs and
+                # simh/simp are on the same scale before quantile mapping.
+                if args.feature == "log":
+                    y_train_raw = np.exp(y_train) - 1
+                elif args.feature == "cbrt":
+                    y_train_raw = np.power(y_train, 3)
+                else:
+                    raise AssertionError()
+
+                X_train_ecmwf_before = X_train["ecmwf_0_pr"].copy()
+                # X_train["ecmwf_0_pr"].plot.hist(
+                #     density=True,
+                #     cumulative=True,
+                #     histtype='step',
+                #     bins=80,
+                #     title="Approximated CDF (before)"
+                # )
+                # plt.show()
+
+                print("Doing bias correction")
+                X_train, X_val = bias_correct_with_cmethods(
+                    X_train, X_val, y_train_raw,
+                    method="quantile_mapping", kind="+", n_quantiles=80,
+                    exclude_percentile=args.bc_exclude_percentile,
+                    extrapolate_extremes=args.bc_extrapolate_extremes,
+                )
+
+                xgb_model = get_xgboost_model()
+                clf_xgb_model = GridSearchCV(xgb_model, param_grid)
+
+                clf_xgb_model.fit(X_train.drop(columns=["year", "is_centre"]), y_train) # Uses 5-fold cross validation
+
+                y_val_pred = clf_xgb_model.predict(X_val.drop(columns=["year", "is_centre"]))
+                y_train_pred = clf_xgb_model.predict(X_train.drop(columns=["year", "is_centre"]))
+
+
+                # Bias correct on XGBoost predictions
+                if args.feature == "log":
+                    y_train_pred_raw = np.exp(y_train_pred) - 1
+                    y_val_pred_raw = np.exp(y_val_pred) - 1
+                elif args.feature == "cbrt":
+                    y_train_pred_raw = np.power(y_train_pred, 3)
+                    y_val_pred_raw = np.power(y_val_pred, 3)
+                else:
+                    raise AssertionError()
+
+                _, y_val_pred_raw_corrected = bias_correct_series(
+                    y_train_pred_raw, y_val_pred_raw, y_train_raw,
+                    method="quantile_mapping", kind="+", n_quantiles=80,
+                    exclude_percentile=args.bc_exclude_percentile,
+                    extrapolate_extremes=args.bc_extrapolate_extremes,
+                )
+
+                if args.feature == "log":
+                    y_val_pred = np.log(y_val_pred_raw_corrected + 1)
+                elif args.feature == "cbrt":
+                    y_val_pred = np.cbrt(y_val_pred_raw_corrected)
+
+
+                # if silo_radius > 0.0:
+                #     y_val_pred = y_val_pred[4::9]  # Select only middle points
+                #     print(len(y_val_pred))
+
+                print(clf_xgb_model.best_estimator_.feature_importances_)
+                y_pred = np.append(y_pred, y_val_pred)
+                print(X_val.describe())
+                X_val_accum.append(X_val)
+                importance = clf_xgb_model.best_params_
+
+
     else:
         X_train, X_test, y_train, y_test = train_test_split(
             X,
@@ -371,7 +391,7 @@ def run_single_point_analysis(grid_point):
     ## Evaluation
 
     def single_point_data_analysis(data):
- 
+
         fig, axes = plt.subplots(nrows=2, ncols=2, figsize = (10,10),sharey=True)
         fig.suptitle("Testing of Observed Precipitation values vs GCMs for region (150.0, -29.0)")
         for idx, model in enumerate(["ecmwf_0_pr", "ukmo_0_pr", "access_0_pr", "XGBoost"]):
@@ -395,9 +415,12 @@ def run_single_point_analysis(grid_point):
         y = np.power(y, 3)
 
     if is_yearly_split:
-        X_val_all = pd.concat(X_val_accum)
-        print(X_val_all)
-        testing = X_val_all.copy()
+        if args.forecast:
+            testing = X_val.copy()
+        else:
+            X_val_all = pd.concat(X_val_accum)
+            print(X_val_all)
+            testing = X_val_all.copy()
         testing["XGBoost"] = y_pred
         testing["obs_pr"] = y
         if silo_radius > 0:
@@ -467,13 +490,13 @@ elif range_id == 1:
     lon_range = (150, 151)
 # elif range_id == 2:
 #     lat_range = (-29, -28)
-#     lon_range = (150, 151) 
+#     lon_range = (150, 151)
 elif range_id == 2:
     lat_range = (-17, -16)
-    lon_range = (143, 147) 
+    lon_range = (143, 147)
 elif range_id == 3:
     lat_range = (-29, -9)
-    lon_range = (138, 154) 
+    lon_range = (138, 154)
 
 def is_valid_silo_point(lat, lon, tolerance=0.02, min_valid_fraction=0.8):
 
@@ -518,7 +541,12 @@ rows = list(results)
 
 
 headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse", "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
-with open(f"/scratch/tm70/ag9761/iceds_datasets/bias_analysis/after/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
+if args.forecast:
+    output_dir = "/scratch/tm70/ag9761/iceds_datasets/forecast"
+else:
+    output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
+
+with open(f"{output_dir}/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(headers)   # Writes a single row (header)
     writer.writerows(rows)     # Writes multiple data rows at once

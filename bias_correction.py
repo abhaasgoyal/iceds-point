@@ -1,5 +1,5 @@
-
 import numpy as np
+import pandas as pd
 import xarray as xr
 from cmethods import adjust
 import re
@@ -198,3 +198,39 @@ def bias_correct_with_cmethods(X_train, X_val, y_train, method="quantile_mapping
 
     return X_train_corrected, X_val_corrected
 
+
+def bias_correct_series(train_series, val_series, obs_series, method="quantile_mapping",
+                         kind="+", n_quantiles=80,
+                         exclude_percentile=95.0, extrapolate_cutoff=10.0,
+                         extrapolate_extremes=False):
+    """
+    Bias-correct a single 1D series (e.g. XGBoost's own predictions) against
+    obs_series, using train_series as the historical simulation (simh) - the
+    single-series analogue of bias_correct_with_cmethods, which only knows
+    how to correct GCM forecast columns (ecmwf_*_pr / ukmo_*_pr / access_*_pr)
+    inside a DataFrame.
+
+    Reuses bias_correct_with_cmethods unmodified: train_series and
+    val_series are each wrapped as a single-column DataFrame under a
+    synthetic column name that matches get_forecast_columns()'s regex, so
+    the existing per-column quantile-mapping / extreme-value logic runs
+    exactly as it does for a real GCM column. The corrected column is then
+    unwrapped back into a plain 1D numpy array.
+
+    Returns (train_corrected, val_corrected) as 1D numpy arrays, same shape
+    as train_series/val_series respectively.
+    """
+    synthetic_col = "ecmwf_0_pr"  # any name matching the get_forecast_columns() regex
+
+    train_df = pd.DataFrame({synthetic_col: np.asarray(train_series)})
+    val_df = pd.DataFrame({synthetic_col: np.asarray(val_series)})
+
+    train_corrected_df, val_corrected_df = bias_correct_with_cmethods(
+        train_df, val_df, obs_series,
+        method=method, kind=kind, n_quantiles=n_quantiles,
+        exclude_percentile=exclude_percentile,
+        extrapolate_cutoff=extrapolate_cutoff,
+        extrapolate_extremes=extrapolate_extremes,
+    )
+
+    return train_corrected_df[synthetic_col].values, val_corrected_df[synthetic_col].values

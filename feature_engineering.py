@@ -64,14 +64,30 @@ class FeatureEngineering:
     
     # TODO: Add climatology feature
 
-def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args):
+def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_forecast=False):
     dataset = xr.merge([feature_dataset.ds, silo], join="outer")
-    dataset = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
+
+    if is_forecast:
+        # hindcast_time = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
+        # forecast_time = dataset.sel(time=slice("2025-05-01", "2026-04-30"))
+        time = dataset["time"]
+        mask = (
+            ((time >= np.datetime64("1993-01-01")) & (time <= np.datetime64("2016-12-31"))) |
+            ((time >= np.datetime64("2025-05-01")) & (time <= np.datetime64("2026-04-30"))) 
+        )
+        dataset = dataset.sel(time=mask) # xr.concat([hindcast_time, forecast_time], dim="time")
+    else:
+        dataset = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
 
     dataset = dataset.to_dataframe().sort_values(by=['time', "latitude", "longitude"])
 
     dataset["is_centre"] = np.where((np.isclose(dataset.index.get_level_values("latitude"), grid_point[0])) & (np.isclose(dataset.index.get_level_values("longitude"), grid_point[1])), 1, 0)
-    assert dataset["is_centre"].sum() == 288
+
+    if is_forecast:
+        # print(dataset["is_centre"].sum())
+        assert dataset["is_centre"].sum() == 300 # TODO: should be until April but doing under feb due to UKMO testing
+    else:
+        assert dataset["is_centre"].sum() == 288
 
     # Rounded Index to integer (upto 0.5 degree)
     
