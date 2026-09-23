@@ -4,15 +4,17 @@ Scripts in the order they are run. `feature_engineering.py` and `bias_correction
 
 | # | Script | Purpose |
 |---|--------|---------|
-| 1 | `download_datasets.py` | Downloads raw ECMWF/UKMO/BoM seasonal forecast NetCDFs from the CDS API, one file per model per region. download SILO observations|
+| 1 | `download_datasets.py` | Downloads raw ECMWF/UKMO/BoM seasonal forecast NetCDFs from the CDS API, one file per model per region. |
+| 1 | `silo/silo_dataset.sh` | Download raw observation (Queensland SILO) precipitation data across years and collates them in a single file |
 | 2 | `preprocess-cds.py` | Converts each raw model file to climpred's `valid_time`+`lead` layout (mm/day, ensemble median), then merges the three models into `preprocessed_dataset_{region}_new.nc`. |
 | – | `feature_engineering.py` | Library. Builds one feature column per model/lead (`ecmwf_0_pr`, `ukmo_1_pr`, …) and assembles the training frame: merge with SILO, wet/dry season filter, cbrt or log transform of rainfall. |
 | – | `bias_correction.py` | Library. Quantile-maps each GCM forecast column onto the observations, fitting only on non-extreme obs/simh pairs and optionally extrapolating the fit onto extremes. |
 | 3 | `ensemble_xgboost.py` | Trains XGBoost on hexagonal grid points around each location. Lead 0 only. |
 | 3 | `ensemble_xgboost_nearest.py` | As above but using every point within 0.25° of the grid point, with `--region` / `--lead_time` / `--feature` / `--season` options. Best-performing variant. |
-| 3 | `ensemble_xgboost_nearest_forecast.py` | `ensemble_xgboost_nearest.py` extended to also read the live forecast dataset alongside the hindcast. |
 | 4 | `plot_heatmap.py` | Seaborn grid heatmaps of MAE/RMSE for all four models, plus an XGBoost − ECMWF difference plot. One figure per region. |
+| 4 | `bias_analysis.py` | Seaborn boxplots and histograms for mean bias comparison before and after quantile mapping bias correction across the 3 models, XGBoost bias also shown after bias correction |
 | 4 | `plot_heatmap_cartopy.py` | The same metrics drawn on a Cartopy map with the Queensland boundary and coastlines, all regions on one figure. |
+| 4 | `plot_lead_time_results.py` | The same metrics per region or aggregated across regions showing mean metric vs lead time, one line per model.  |
 
 The three step-3 scripts are alternatives, not a sequence. Each writes `output_region{R}_lead{L}_feature{F}_perc{P}.csv`, which the step-4 plotting scripts read.
 
