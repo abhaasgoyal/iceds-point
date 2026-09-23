@@ -4,9 +4,17 @@ import re
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from matplotlib.patches import Patch
 
-SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets"
-OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/heatmaps_queensland"
+is_forecast = True 
+
+if is_forecast:
+    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast"
+    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast/heatmaps_queensland_diff"
+else:
+    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
+    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/heatmaps_queensland_diff"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 REGIONS = [3]  # Queensland region
@@ -14,6 +22,7 @@ LEAD = [1, 2, 3, 4, 5, 6]
 FEATURE = ["cbrt"]
 
 MODELS = ["XGBoost", "ecmwf", "ukmo", "access"]
+OTHER_MODELS = ["ecmwf", "ukmo", "access"]  # models to compare XGBoost against
 METRICS = ["mae", "rmse"]
 
 
@@ -28,6 +37,81 @@ def load_region(feature, lead, region):
     data = pd.read_csv(src)
     data["lat"], data["lon"] = zip(*data["Point"].map(parse_point))
     return data
+
+
+def plot_diff(data, region, metric, lead, feature):
+    """Plot XGBoost vs best-of-3 diff, alongside a categorical map of
+    which model (ecmwf/ukmo/access) was best at each point."""
+    xgb_col = f"XGBoost_{metric}"
+    other_cols = [f"{m}_{metric}" for m in OTHER_MODELS]
+
+    result = data.set_index(["lat", "lon"])[[xgb_col] + other_cols].astype(float)
+    result.columns = ["XGBoost"] + OTHER_MODELS
+
+    # best (lowest error) of the 3 non-XGBoost models at each point
+    best_other = result[OTHER_MODELS].min(axis=1)
+    best_other_name = result[OTHER_MODELS].idxmin(axis=1)  # which model won, per point
+
+    diff = (result["XGBoost"] - best_other).rename("diff")
+
+    n_lats = diff.index.get_level_values("lat").nunique()
+    n_lons = diff.index.get_level_values("lon").nunique()
+    cell_size = 0.6
+    fig_w = max(12, n_lons * cell_size * 2)
+    fig_h = max(6, n_lats * cell_size)
+
+    diff_pivot = diff.unstack()
+    diff_pivot = diff_pivot.sort_index(axis=0, ascending=False)  # north on top
+    diff_pivot = diff_pivot.sort_index(axis=1)  # lon left-to-right
+
+    best_pivot = best_other_name.unstack()
+    best_pivot = best_pivot.reindex_like(diff_pivot)  # match row/col order
+
+    # map model names -> integer codes for the categorical heatmap
+    model_codes = {m: i for i, m in enumerate(OTHER_MODELS)}
+    code_pivot = best_pivot.replace(model_codes).astype(float)
+
+    colors = ["#4C72B0", "#DD8452", "#55A868"]  # one distinct color per model
+    cmap = ListedColormap(colors)
+    bounds = list(range(len(OTHER_MODELS) + 1))
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    max_abs = np.nanmax(np.abs(diff_pivot.values))
+
+    fig, axes = plt.subplots(ncols=2, figsize=(fig_w, fig_h), sharey=True)
+
+    # left panel: diff heatmap
+    sns.heatmap(
+        diff_pivot, annot=True, fmt=".3f", annot_kws={"size": 8},
+        ax=axes[0], vmin=-max_abs, vmax=max_abs, cmap="RdBu_r",
+        square=True, linewidths=0.5, linecolor="white",
+        cbar_kws={"label": f"XGBoost - best-of-3 ({metric.upper()})"},
+    )
+    axes[0].set_title(f"XGBoost - best-of-3 {metric.upper()}\nmean diff: {diff.mean():.3f}")
+
+    # right panel: categorical "who won" heatmap
+    sns.heatmap(
+        code_pivot, cmap=cmap, norm=norm,
+        ax=axes[1], square=True, linewidths=0.5, linecolor="white",
+        cbar=False,
+    )
+    axes[1].set_title("Best of the 3 models at each point")
+    legend_handles = [Patch(color=colors[i], label=OTHER_MODELS[i].upper()) for i in range(len(OTHER_MODELS))]
+    axes[1].legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
+
+    fig.suptitle(
+        f"XGBoost vs best-of-3 ({'/'.join(m.upper() for m in OTHER_MODELS)}) {metric.upper()} "
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})"
+    )
+
+    plt.tight_layout()
+    out_path = f"{OUT_DIR}/diff_best3_{metric}_heatmap_{feature}_lead{lead}_region{region}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close(fig)
+    print(f"saved {out_path}")
+
+    # quick summary of which model was the "best other" most often
+    print(best_other_name.str.upper().value_counts())
 
 
 def plot_metric(data, region, metric, lead, feature):
@@ -64,51 +148,11 @@ def plot_metric(data, region, metric, lead, feature):
             ax=axes[i, j], vmin=vmin, vmax=vmax, cmap="viridis",
             square=True, linewidths=0.5, linecolor="white",
         )
-        ax.set_title(f"{model}: {model_mean[model]:.3f}")
+        ax.set_title(f"{model.upper()}: {model_mean[model]:.3f}")
 
     plt.tight_layout()
     out_path = f"{OUT_DIR}/{metric}_heatmap_{feature}_lead{lead}_region{region}.png"
-    plt.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"saved {out_path}")
-
-
-def plot_diff(data, region, metric, lead, feature):
-    """Plot the difference between XGBoost and ECMWF for a given metric."""
-    xgb_col = f"XGBoost_{metric}"
-    ecmwf_col = f"ecmwf_{metric}"
-    result = data.set_index(["lat", "lon"])[[xgb_col, ecmwf_col]].astype(float)
-    diff = (result[xgb_col] - result[ecmwf_col]).rename("diff")
-
-    n_lats = diff.index.get_level_values("lat").nunique()
-    n_lons = diff.index.get_level_values("lon").nunique()
-    cell_size = 0.6
-    fig_w = max(6, n_lons * cell_size)
-    fig_h = max(6, n_lats * cell_size)
-
-    pivot = diff.unstack()
-    pivot = pivot.sort_index(axis=0, ascending=False)
-    pivot = pivot.sort_index(axis=1)
-
-    # diverging colormap centered at 0 so we can see which model does better
-    max_abs = np.nanmax(np.abs(pivot.values))
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    sns.heatmap(
-        pivot, annot=True, fmt=".3f", annot_kws={"size": 8},
-        ax=ax, vmin=-max_abs, vmax=max_abs, cmap="RdBu_r",
-        square=True, linewidths=0.5, linecolor="white",
-        cbar_kws={"label": f"XGBoost - ECMWF ({metric.upper()})"},
-    )
-    ax.set_title(
-        f"XGBoost vs ECMWF {metric.upper()} difference "
-        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})\n"
-        f"mean diff: {diff.mean():.3f}"
-    )
-
-    plt.tight_layout()
-    out_path = f"{OUT_DIR}/diff_{metric}_heatmap_{feature}_lead{lead}_region{region}.png"
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=300)
     plt.close(fig)
     print(f"saved {out_path}")
 
@@ -118,5 +162,5 @@ for feature in FEATURE:
         for region in REGIONS:
             data = load_region(feature, lead, region)
             for metric in METRICS:
+                plot_diff(data, region, metric, lead, feature)   # diff shown first
                 plot_metric(data, region, metric, lead, feature)
-                plot_diff(data, region, metric, lead, feature)
