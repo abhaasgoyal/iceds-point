@@ -431,8 +431,11 @@ def run_single_point_analysis(grid_point):
     # single_point_data_analysis(testing)
 
 
-    testing_temp = testing # .drop(testing.index[-4])
-    testing_temp = testing_temp.iloc[(args.lead_time - 1):]
+    testing_temp = testing
+    if not args.forecast:
+        # In hindcast data, this is done since the models start predictions from Jan 1993
+        testing_temp = testing_temp.iloc[(args.lead_time - 1):]
+
     ukmo_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing[f"ukmo_{args.lead_time - 1}_pr"])
 
     model_mae = {
