@@ -71,6 +71,10 @@ def process_dataset(dataset_name: str, range_id: int, is_forecast: bool = False)
     dataset = dataset.rename({"valid_time": "time"})
     dataset = dataset.drop_vars(["init"])
 
+    # TODO: Comment out in case this methodology isn't right
+    if is_forecast and dataset_name == "ukmo_604":
+        dataset = dataset.isel(member=slice(0, 8))
+
     # Prediction on ensemble median
     # NOTE: Having lower prediction value
     dataset = dataset.median(dim="member")
