@@ -68,12 +68,11 @@ def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_for
     dataset = xr.merge([feature_dataset.ds, silo], join="outer")
 
     if is_forecast:
-        # hindcast_time = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
-        # forecast_time = dataset.sel(time=slice("2025-05-01", "2026-04-30"))
         time = dataset["time"]
+        lead_time_filter = "2025-10-01" if args.lead_time == 6 else "2025-09-01"
         mask = (
             ((time >= np.datetime64("1993-01-01")) & (time <= np.datetime64("2016-12-31"))) |
-            ((time >= np.datetime64("2025-05-01")) & (time <= np.datetime64("2026-04-30"))) 
+            ((time >= np.datetime64(lead_time_filter)) & (time <= np.datetime64("2026-08-31"))) 
         )
         dataset = dataset.sel(time=mask) # xr.concat([hindcast_time, forecast_time], dim="time")
     else:

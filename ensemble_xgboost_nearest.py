@@ -161,6 +161,7 @@ def run_single_point_analysis(grid_point):
         silo["latitude"] = silo["latitude"].round(decimals=2)
 
         cutoff_points = 81
+        # TODO: Fix more optimally
         silo, points = dataset_within_radius(silo, grid_point, model_radius, cutoff_points)
         # gcms = dataset_within_radius(gcms, grid_point, model_radius)
 
@@ -534,15 +535,15 @@ with ProcessPoolExecutor() as executor:
 
 rows = list(results)
 
+HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets/"
+
+if args.no_bias_correction:
+    print("no bias correction")
+
 headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse", "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
-if args.forecast:
-    output_dir = "/scratch/tm70/ag9761/iceds_datasets/forecast"
-else:
-    if args.no_bias_correction:
-        print("no bias correction")
-        output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/before"
-    else:
-        output_dir = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
+cast_dir  = "forecast" if args.forecast else "hindcast"
+bias_dir = "before" if args.no_bias_correction else "after"
+output_dir = f"{HOME_DIR}/{cast_dir}/{args.season}/bias_analysis/{bias_dir}"
 
 with open(f"{output_dir}/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
