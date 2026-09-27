@@ -1,12 +1,40 @@
 #!/bin/bash
+# Usage:
+#   bash run_sims.sh               # submit sims, then plots once they all finish
+#   bash run_sims.sh --plots-only  # submit only the plot job (uses existing results)
 
-for region in {0..2}
+# ---- choose params here ----
+SEASON=wet        # dry | wet
+FORECAST=true    # true = forecast, false = hindcast
+BIAS=after        # before | after (for plot_heatmap.py / plot_lead_time_results.py)
+# ----------------------------
+
+PLOT_VARS="PLOT_SEASON=$SEASON,PLOT_FORECAST=$FORECAST,PLOT_BIAS=$BIAS"
+
+if [ "$1" = "--plots-only" ]; then
+    plot_id=$(qsub -v $PLOT_VARS run_plots.sh)
+    echo "submitted plots $plot_id"
+    exit 0
+fi
+
+job_ids=""
+
+for region in 3
 do
-    for lead in 1 3 6 
+    for lead in {1..6}
     do
-	for feature in cbrt log 
-	do
-	    qsub -v XGBOOST_REGION=$region,XGBOOST_LEAD=$lead,XGBOOST_FEATURE="$feature" run_xgboost_sim.sh
-	done
+        for feature in cbrt # log
+        do
+            for bc_exclude_percentile in 95 97 100
+            do
+                job_id=$(qsub -v XGBOOST_REGION=$region,XGBOOST_LEAD=$lead,XGBOOST_FEATURE="$feature",XGBOOST_BC_EXCLUDE_PERCENTILE=$bc_exclude_percentile run_xgboost_sim.sh)
+                echo "submitted sim $job_id (region $region, lead $lead, $feature, perc $bc_exclude_percentile)"
+                job_ids="$job_ids:$job_id"
+            done
+        done
     done
 done
+
+# plots run only after every sim above finishes successfully
+plot_id=$(qsub -W depend=afterok$job_ids -v $PLOT_VARS run_plots.sh)
+echo "submitted plots $plot_id (waits on all sims)"
