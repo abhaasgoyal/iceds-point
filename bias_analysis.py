@@ -1,13 +1,33 @@
-import pandas as pd
-import numpy as np
-import re
-import matplotlib.pyplot as plt
-import seaborn as sns
+import argparse
 import os
+import re
 
-is_forecast = True
-season = "wet"
-forecast = "forecast" if is_forecast else "hindcast"
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot bias histograms and boxplots before vs. after correction."
+    )
+    parser.add_argument(
+        "--season",
+        required=True,
+        help="Season subfolder to read from, e.g. dry or wet",
+    )
+    parser.add_argument(
+        "--forecast",
+        action="store_true",
+        help="Use forecast data instead of hindcast (default: hindcast)",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
+season = args.season
+forecast = "forecast" if args.forecast else "hindcast"
 
 SRC_DIR = f"/scratch/tm70/ag9761/iceds_datasets/{forecast}/{season}"
 BEFORE_DIR = f"{SRC_DIR}/bias_analysis/before"
@@ -49,6 +69,10 @@ def get_bias_data(region, lead, feature):
     return before_bias, after_bias
 
 
+def model_label(model):
+    return model if model == "XGBoost" else model.upper()
+
+
 def plot_bias_histograms(region, lead, feature):
     """Two-row histogram of per-point bias.
 
@@ -81,7 +105,7 @@ def plot_bias_histograms(region, lead, feature):
         ax.hist(vals, bins=bins, color=color, edgecolor="white")
         ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
         ax.axvline(vals.mean(), color="black", linewidth=1.2)
-        ax.set_title(f"{model if model == "XGBoost" else model.upper()} (after)\nmean bias: {vals.mean():.3f}")
+        ax.set_title(f"{model_label(model)} (after)\nmean bias: {vals.mean():.3f}")
         ax.set_xlim(vmin, vmax)
 
     # bottom row: before bias correction (3 panels, aligned under the top
@@ -92,12 +116,13 @@ def plot_bias_histograms(region, lead, feature):
         ax.hist(vals, bins=bins, color="#8C8C8C", edgecolor="white")
         ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
         ax.axvline(vals.mean(), color="black", linewidth=1.2)
-        ax.set_title(f"{model if model == "XGBoost" else model.upper()} (before)\nmean bias: {vals.mean():.3f}")
+        ax.set_title(f"{model_label(model)} (before)\nmean bias: {vals.mean():.3f}")
         ax.set_xlim(vmin, vmax)
 
     fig.suptitle(
         f"Bias distribution before vs. after correction "
-        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})"
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()}, "
+        f"{season} season {forecast})"
     )
     plt.tight_layout()
     out_path = f"{OUT_DIR}/bias_hist_{feature}_lead{lead}_region{region}.png"
@@ -137,7 +162,7 @@ def plot_bias_boxplots(region, lead, feature):
         color = xgb_color if model == "XGBoost" else top_color
         sns.boxplot(y=vals, ax=ax, color=color)
         ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-        ax.set_title(f"{model if model == "XGBoost" else model.upper()} (after)\nmean bias: {vals.mean():.3f}")
+        ax.set_title(f"{model_label(model)} (after)\nmean bias: {vals.mean():.3f}")
         ax.set_ylim(after_vmin - after_pad, after_vmax + after_pad)
         ax.set_ylabel("bias" if j == 0 else "")
 
@@ -148,13 +173,14 @@ def plot_bias_boxplots(region, lead, feature):
         vals = before_bias[model]
         sns.boxplot(y=vals, ax=ax, color="#8C8C8C")
         ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-        ax.set_title(f"{model if model == "XGBoost" else model.upper()} (before)\nmean bias: {vals.mean():.3f}")
+        ax.set_title(f"{model_label(model)} (before)\nmean bias: {vals.mean():.3f}")
         ax.set_ylim(before_vmin - before_pad, before_vmax + before_pad)
         ax.set_ylabel("")
 
     fig.suptitle(
         f"Bias boxplots before vs. after correction "
-        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})"
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()}, "
+        f"{season} season {forecast})"
     )
     plt.tight_layout()
     out_path = f"{BOX_OUT_DIR}/bias_box_{feature}_lead{lead}_region{region}.png"
@@ -163,8 +189,9 @@ def plot_bias_boxplots(region, lead, feature):
     print(f"saved {out_path}")
 
 
-for feature in FEATURE:
-    for lead in LEAD:
-        for region in REGIONS:
-            plot_bias_histograms(region, lead, feature)
-            plot_bias_boxplots(region, lead, feature)
+if __name__ == "__main__":
+    for feature in FEATURE:
+        for lead in LEAD:
+            for region in REGIONS:
+                plot_bias_histograms(region, lead, feature)
+                plot_bias_boxplots(region, lead, feature)

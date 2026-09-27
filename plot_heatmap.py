@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import numpy as np
 import re
@@ -7,14 +8,41 @@ import os
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.patches import Patch
 
-is_forecast = True 
+HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets"
 
-if is_forecast:
-    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast"
-    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast/heatmaps_queensland_diff"
-else:
-    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
-    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/heatmaps_queensland_diff"
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot Queensland metric and XGBoost vs best-of-3 diff heatmaps."
+    )
+    parser.add_argument(
+        "--season",
+        required=True,
+        help="Season subfolder to read from, e.g. dry or wet",
+    )
+    parser.add_argument(
+        "--forecast",
+        action="store_true",
+        help="Use forecast data instead of hindcast (default: hindcast)",
+    )
+    parser.add_argument(
+        "--bias",
+        choices=["before", "after"],
+        default="after",
+        help="Bias-correction stage to plot (default: after)",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
+is_forecast = args.forecast
+season = args.season
+bias = args.bias
+
+out_dir_cast = "forecast" if is_forecast else "hindcast"
+SRC_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}"
+OUT_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}/heatmaps_queensland_diff"
+
 os.makedirs(OUT_DIR, exist_ok=True)
 
 REGIONS = [3]  # Queensland region

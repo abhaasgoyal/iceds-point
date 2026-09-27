@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import numpy as np
 import re
@@ -5,14 +6,41 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 
-is_forecast = True
+HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets"
 
-if is_forecast:
-    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast"
-    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/forecast/lead_plots_all"
-else:
-    SRC_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/bias_analysis/after"
-    OUT_DIR = "/scratch/tm70/ag9761/iceds_datasets/hindcast/lead_plots_all"
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot mean metrics vs lead time for each model."
+    )
+    parser.add_argument(
+        "--season",
+        required=True,
+        help="Season subfolder to read from, e.g. dry or wet",
+    )
+    parser.add_argument(
+        "--forecast",
+        action="store_true",
+        help="Use forecast data instead of hindcast (default: hindcast)",
+    )
+    parser.add_argument(
+        "--bias",
+        choices=["before", "after"],
+        default="after",
+        help="Bias-correction stage to plot (default: after)",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
+is_forecast = args.forecast
+season = args.season
+bias = args.bias
+
+out_dir_cast = "forecast" if is_forecast else "hindcast"
+SRC_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}"
+OUT_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}/lead_plots_all"
+
 os.makedirs(OUT_DIR, exist_ok=True)
 
 REGIONS = [3]
@@ -21,6 +49,8 @@ FEATURE = ["cbrt"]
 MODELS = ["XGBoost", "ecmwf", "ukmo", "access"]
 METRICS = ["mae", "rmse"]
 
+def model_label(model):
+    return model if model == "XGBoost" else model.upper()
 
 def parse_point(s):
     nums = re.findall(r"float64\((-?\d+\.?\d*)\)", s)
@@ -87,6 +117,7 @@ def plot_metric_vs_lead(summary, feature, metric):
 
     for ax, region in zip(axes, regions_sorted):
         region_sub = sub[sub["region"] == region]
+        region_sub = region_sub.assign(model=region_sub["model"].map(model_label))
         sns.lineplot(
             data=region_sub, x="lead", y="mean_value", hue="model",
             marker="o", ax=ax
@@ -110,6 +141,7 @@ def plot_metric_vs_lead_combined(summary, feature, metric):
     one line per model."""
     sub = summary[(summary["feature"] == feature) & (summary["metric"] == metric)]
     overall = sub.groupby(["lead", "model"], as_index=False)["mean_value"].mean()
+    overall = overall.assign(model=overall["model"].map(model_label))
 
     fig, ax = plt.subplots(figsize=(7, 5))
     sns.lineplot(
@@ -137,4 +169,5 @@ if __name__ == "__main__":
     for feature in FEATURE:
         for metric in METRICS:
             plot_metric_vs_lead(summary, feature, metric)          # per-region subplots
-            plot_metric_vs_lead_combined(summary, feature, metric)  # averaged across regions
+            if len(REGIONS) > 1:
+                plot_metric_vs_lead_combined(summary, feature, metric)  # averaged across regions
