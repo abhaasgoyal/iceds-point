@@ -27,7 +27,7 @@ areas = [
 print(areas)
 
 # ---------------------------------------------------------------------------
-# Models to download, for the forecast period May 2025 - May 2026 (inclusive).
+# Models to download, for the forecast period May 2025 - Sep 2026 (inclusive).
 #
 # ECMWF and BOM keep a single 'system' number across the whole window.
 # UKMO changes 'system' partway through (per the C3S nominal-start-dates
@@ -44,7 +44,7 @@ models = [
                 "system": "51",
                 "year_months": {
                     2025: ["05", "06", "07", "08", "09", "10", "11", "12"],
-                    2026: ["01", "02", "03", "04"],
+                    2026: ["01", "02", "03", "04", "05", "06", "07", "08", "09"],
                 },
             },
         ],
@@ -56,7 +56,7 @@ models = [
                 "system": "2",
                 "year_months": {
                     2025: ["05", "06", "07", "08", "09", "10", "11", "12"],
-                    2026: ["01", "02", "03", "04"],
+                    2026: ["01", "02", "03", "04", "05", "06", "07", "08", "09"],
                 },
             },
         ],
@@ -65,11 +65,11 @@ models = [
         "originating_centre": "ukmo",
         "periods": [
             {
-                # May 2025 - Jan 2026
+                # May 2025 - Feb 2026
                 "system": "604",
                 "year_months": {
                     2025: ["05", "06", "07", "08", "09", "10", "11", "12"],
-                    2026: ["01", "02"],  # Feb 2026 is also system 604
+                    2026: ["01", "02"],
                 },
             },
             {
@@ -80,10 +80,10 @@ models = [
                 },
             },
             {
-                # from April 2026 onward
+                # April 2026 - Sep 2026
                 "system": "610",
                 "year_months": {
-                    2026: ["04"],
+                    2026: ["04", "05", "06", "07", "08", "09"],
                 },
             },
         ],
