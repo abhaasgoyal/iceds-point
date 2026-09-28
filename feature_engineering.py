@@ -1,5 +1,6 @@
 import xarray as xr
 from xarray import DataArray, Dataset
+import rioxarray
 import numpy as np
 import pandas as pd
 
@@ -58,7 +59,7 @@ class FeatureEngineering:
             for k in param_lead_time.data_vars
         })
     
-    def add_obs_window_time(self, period: int):
+    def add_obs_window_time(self, period: int, silo):
         for i in range(period):
             self.ds[f"window_{period - 1}"] = silo["pr"].shift(time=period)
     
@@ -66,6 +67,7 @@ class FeatureEngineering:
 
 def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_forecast=False):
     dataset = xr.merge([feature_dataset.ds, silo], join="outer")
+    n_forecast_months = 11 if args.lead_time == 6 else 12
 
     if is_forecast:
         time = dataset["time"]
@@ -75,6 +77,14 @@ def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_for
             ((time >= np.datetime64(lead_time_filter)) & (time <= np.datetime64("2026-08-31"))) 
         )
         dataset = dataset.sel(time=mask) # xr.concat([hindcast_time, forecast_time], dim="time")
+        # forecast period should be Oct-Aug (11 months) for lead 6, Sep-Aug (12 months) otherwise
+        forecast_time = dataset["time"].where(dataset["time"] >= np.datetime64(lead_time_filter), drop=True)
+        dataset_forecast_months = np.unique(forecast_time.values.astype("datetime64[M]")).size
+        
+        assert dataset_forecast_months == n_forecast_months, (
+            f"expected {n_forecast_months} forecast months for lead {args.lead_time}, "
+            f"got {dataset_forecast_months}"
+        )
     else:
         dataset = dataset.sel(time=slice("1993-01-01", "2016-12-31"))
 
@@ -83,8 +93,7 @@ def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_for
     dataset["is_centre"] = np.where((np.isclose(dataset.index.get_level_values("latitude"), grid_point[0])) & (np.isclose(dataset.index.get_level_values("longitude"), grid_point[1])), 1, 0)
 
     if is_forecast:
-        # print(dataset["is_centre"].sum())
-        assert dataset["is_centre"].sum() == 300 # TODO: should be until April but doing under feb due to UKMO testing
+        assert dataset["is_centre"].sum() == 288 + n_forecast_months
     else:
         assert dataset["is_centre"].sum() == 288
 
