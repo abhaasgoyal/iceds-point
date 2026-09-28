@@ -1,8 +1,12 @@
+import re
+
 import numpy as np
 import pandas as pd
 import xarray as xr
 from cmethods import adjust
-import re
+
+from feature_engineering import forward_transform, inverse_transform
+
 
 def get_forecast_columns(df):
     """GCM forecast columns eligible for bias correction (e.g. 'ecmwf_0_pr')."""
@@ -198,7 +202,6 @@ def bias_correct_with_cmethods(X_train, X_val, y_train, method="quantile_mapping
 
     return X_train_corrected, X_val_corrected
 
-
 def bias_correct_series(train_series, val_series, obs_series, method="quantile_mapping",
                          kind="+", n_quantiles=80,
                          exclude_percentile=95.0, extrapolate_cutoff=10.0,
@@ -234,3 +237,42 @@ def bias_correct_series(train_series, val_series, obs_series, method="quantile_m
     )
 
     return train_corrected_df[synthetic_col].values, val_corrected_df[synthetic_col].values
+
+def bias_correct_gcm_features(X_train, X_val, y_train, args):
+    """Quantile-map only the GCM rainfall columns; leave all other features
+    (year, is_centre, month_sin, month_cos, ...) untouched."""
+
+    y_train_raw = inverse_transform(y_train, args.feature)
+    gcm_cols = [c for c in X_train.columns if c.endswith("_pr")]
+
+    X_train_bc, X_val_bc = bias_correct_with_cmethods(
+        X_train[gcm_cols], X_val[gcm_cols], y_train_raw,
+        method="quantile_mapping", kind="+", n_quantiles=80,
+        exclude_percentile=args.bc_exclude_percentile,
+        extrapolate_extremes=args.bc_extrapolate_extremes,
+    )
+
+    X_train = X_train.copy()
+    X_val = X_val.copy()
+    X_train[gcm_cols] = X_train_bc[gcm_cols].to_numpy()
+    X_val[gcm_cols] = X_val_bc[gcm_cols].to_numpy()
+    return X_train, X_val
+
+
+def bias_correct_predictions(y_train_pred, y_val_pred, y_train, args):
+    """Quantile-map XGBoost validation predictions onto the observed
+    distribution. Predictions come in on the cbrt/log scale and are returned
+    on the same scale; y_train_raw is observed rainfall on the raw scale."""
+    y_train_pred_raw = inverse_transform(y_train_pred, args.feature)
+    y_val_pred_raw = inverse_transform(y_val_pred, args.feature)
+    y_train_raw = inverse_transform(y_train, args.feature)
+
+    _, y_val_pred_raw_corrected = bias_correct_series(
+        y_train_pred_raw, y_val_pred_raw, y_train_raw,
+        method="quantile_mapping", kind="+", n_quantiles=80,
+        exclude_percentile=args.bc_exclude_percentile,
+        extrapolate_extremes=args.bc_extrapolate_extremes,
+    )
+
+    return forward_transform(y_val_pred_raw_corrected, args.feature)
+

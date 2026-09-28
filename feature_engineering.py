@@ -1,8 +1,9 @@
-import xarray as xr
-from xarray import DataArray, Dataset
-import rioxarray
 import numpy as np
 import pandas as pd
+import rioxarray
+import xarray as xr
+from xarray import DataArray, Dataset
+
 
 class FeatureEngineering:
 
@@ -16,6 +17,13 @@ class FeatureEngineering:
     def _process_dates(self):
         self.ds["month"] = self.ds["time"].dt.month
         self.ds["year"] = self.ds["time"].dt.year
+
+    def enable_seasonality_feature(self):
+        """Cyclical month encoding."""
+        angle = 2 * np.pi * (self.ds["month"] % 12) / 12
+        self.ds["month_cos"] = np.cos(angle)
+        self.ds["month_sin"] = np.sin(angle)
+    
     
     def select_lead_time(self, lead_time: int):
         self.ds = self.ds.isel(lead=[lead_time - 1])
@@ -116,12 +124,7 @@ def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_for
         # Treat trace precipitation as effectively zero (< 0.1 mm/day)
         # dataset["pr"] = np.where(dataset["pr"] < 0.1, 0.0, dataset["pr"])
 
-    if args.feature == "log":
-        dataset["pr"] = np.log(dataset["pr"] + 1)
-    elif args.feature == "cbrt":
-        dataset["pr"] = np.cbrt(dataset["pr"])
-    else:
-        raise AssertionError()
+    dataset["pr"] = forward_transform(dataset["pr"], args.feature)
 
     # dataset = pd.get_dummies(dataset, columns=["month"], dtype=int)
     dataset = dataset.drop(columns=["month", "latitude", "longitude"]) 
@@ -129,3 +132,22 @@ def prepare_dataset(feature_dataset, silo, grid_point, silo_radius, args, is_for
     print(dataset)
 
     return dataset
+
+def inverse_transform(values, feature):
+    """Undo the cbrt/log feature transform to get back raw rainfall."""
+    if feature == "log":
+        return np.exp(values) - 1
+    elif feature == "cbrt":
+        return np.power(values, 3)
+    raise AssertionError()
+
+
+def forward_transform(values, feature):
+    """Apply the cbrt/log feature transform to raw rainfall."""
+    if feature == "log":
+        return np.log(values + 1)
+    elif feature == "cbrt":
+        return np.cbrt(values)
+    raise AssertionError()
+
+

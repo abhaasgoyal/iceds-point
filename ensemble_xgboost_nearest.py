@@ -22,8 +22,8 @@ from sklearn.model_selection import (
 from xarray import DataArray, Dataset
 from xgboost import plot_importance
 
-from bias_correction import bias_correct_series, bias_correct_with_cmethods
-from feature_engineering import FeatureEngineering, prepare_dataset
+from bias_correction import bias_correct_gcm_features, bias_correct_predictions
+from feature_engineering import FeatureEngineering, inverse_transform, prepare_dataset
 
 parser = argparse.ArgumentParser(
                     prog='ensemble_xgboost',
@@ -79,33 +79,17 @@ radius_inner_circle = 0.6
 n_points_outer_circle = 6
 radius_outer_circle = 1.039
 
-
-def inverse_transform(values):
-    """Undo the cbrt/log feature transform to get back raw rainfall."""
-    if args.feature == "log":
-        return np.exp(values) - 1
-    elif args.feature == "cbrt":
-        return np.power(values, 3)
-    raise AssertionError()
-
-
-def forward_transform(values):
-    """Apply the cbrt/log feature transform to raw rainfall."""
-    if args.feature == "log":
-        return np.log(values + 1)
-    elif args.feature == "cbrt":
-        return np.cbrt(values)
-    raise AssertionError()
-
-
 def run_single_point_analysis(grid_point):
     # Datasets
+    silo = xr.open_dataset("/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_3_processed_forecast.nc")
     if args.forecast:
-        silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed_forecast.nc")
-        gcms = xr.open_mfdataset([f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc", f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new_forecast.nc"], chunks="auto", compat="override", coords="minimal")
+        gcms = xr.open_mfdataset(["/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new.nc", 
+                                  "/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new_forecast.nc"],
+                                  chunks="auto",
+                                  compat="override",
+                                  coords="minimal")
     else:
-        silo = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_{range_id}_processed.nc")
-        gcms = xr.open_dataset(f"/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_{range_id}_new.nc")
+        gcms = xr.open_dataset("/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new.nc")
 
 
     def construct_circle(origin, n_points, radius, base_angle=0.0, include_origin=False):
@@ -180,6 +164,7 @@ def run_single_point_analysis(grid_point):
 
 
     feature_dataset = FeatureEngineering(gcms, lead_months=args.lead_time)
+    feature_dataset.enable_seasonality_feature()
     # feature_dataset.enable_wet_season_feature()
     # feature_dataset.enable_climate_classification()
     feature_dataset.select_lead_time(args.lead_time)
@@ -246,7 +231,6 @@ def run_single_point_analysis(grid_point):
             # earlier), while the GCM forecast columns in X_train/X_val are
             # still raw rainfall values. Invert the transform so obs and
             # simh/simp are on the same scale before quantile mapping.
-            y_train_raw = inverse_transform(y_train)
 
             # X_train["ecmwf_0_pr"].plot.hist(
             #     density=True,
@@ -259,12 +243,7 @@ def run_single_point_analysis(grid_point):
 
             if not args.no_bias_correction:
                 print("Doing bias correction")
-                X_train, X_val = bias_correct_with_cmethods(
-                    X_train, X_val, y_train_raw,
-                    method="quantile_mapping", kind="+", n_quantiles=80,
-                    exclude_percentile=args.bc_exclude_percentile,
-                    extrapolate_extremes=args.bc_extrapolate_extremes,
-                )
+                X_train, X_val = bias_correct_gcm_features(X_train, X_val, y_train, args)
 
 
             xgb_model = get_xgboost_model()
@@ -278,17 +257,7 @@ def run_single_point_analysis(grid_point):
 
             # Bias correct on XGBoost predictions
             if not args.no_bias_correction:
-                y_train_pred_raw = inverse_transform(y_train_pred)
-                y_val_pred_raw = inverse_transform(y_val_pred)
-
-                _, y_val_pred_raw_corrected = bias_correct_series(
-                    y_train_pred_raw, y_val_pred_raw, y_train_raw,
-                    method="quantile_mapping", kind="+", n_quantiles=80,
-                    exclude_percentile=args.bc_exclude_percentile,
-                    extrapolate_extremes=args.bc_extrapolate_extremes,
-                )
-
-                y_val_pred = forward_transform(y_val_pred_raw_corrected)
+                y_val_pred = bias_correct_predictions(y_train_pred, y_val_pred, y_train, args)
 
 
             y_pred = y_val_pred
@@ -317,7 +286,6 @@ def run_single_point_analysis(grid_point):
                 # earlier), while the GCM forecast columns in X_train/X_val are
                 # still raw rainfall values. Invert the transform so obs and
                 # simh/simp are on the same scale before quantile mapping.
-                y_train_raw = inverse_transform(y_train)
 
                 # X_train["ecmwf_0_pr"].plot.hist(
                 #     density=True,
@@ -330,12 +298,7 @@ def run_single_point_analysis(grid_point):
 
                 if not args.no_bias_correction:
                     print("Doing bias correction")
-                    X_train, X_val = bias_correct_with_cmethods(
-                        X_train, X_val, y_train_raw,
-                        method="quantile_mapping", kind="+", n_quantiles=80,
-                        exclude_percentile=args.bc_exclude_percentile,
-                        extrapolate_extremes=args.bc_extrapolate_extremes,
-                    )
+                    X_train, X_val = bias_correct_gcm_features(X_train, X_val, y_train, args)
 
                 xgb_model = get_xgboost_model()
                 clf_xgb_model = GridSearchCV(xgb_model, param_grid)
@@ -348,17 +311,7 @@ def run_single_point_analysis(grid_point):
 
                 # Bias correct on XGBoost predictions
                 if not args.no_bias_correction:
-                    y_train_pred_raw = inverse_transform(y_train_pred)
-                    y_val_pred_raw = inverse_transform(y_val_pred)
-
-                    _, y_val_pred_raw_corrected = bias_correct_series(
-                        y_train_pred_raw, y_val_pred_raw, y_train_raw,
-                        method="quantile_mapping", kind="+", n_quantiles=80,
-                        exclude_percentile=args.bc_exclude_percentile,
-                        extrapolate_extremes=args.bc_extrapolate_extremes,
-                    )
-
-                    y_val_pred = forward_transform(y_val_pred_raw_corrected)
+                    y_val_pred = bias_correct_predictions(y_train_pred, y_val_pred, y_train, args)
 
 
                 # if silo_radius > 0.0:
@@ -404,8 +357,8 @@ def run_single_point_analysis(grid_point):
             ax.set_title(model)
         plt.show()
 
-    y_pred = inverse_transform(y_pred)
-    y = inverse_transform(y)
+    y_pred = inverse_transform(y_pred, args.feature)
+    y = inverse_transform(y, args.feature)
 
     if is_yearly_split:
         if args.forecast:
@@ -478,18 +431,15 @@ def run_single_point_analysis(grid_point):
 if range_id == 0:
     lat_range = (-25, -21)
     lon_range = (142, 146)
-# elif range_id == 1:
-#     lat_range = (-29, -25)
-#     lon_range = (150, 154)
 elif range_id == 1:
-    lat_range = (-29, -28)
-    lon_range = (150, 151)
-# elif range_id == 2:
+    lat_range = (-29, -25)
+    lon_range = (150, 154)
+elif range_id == 2:
+    lat_range = (-20, -16)
+    lon_range = (143, 147)
+# elif range_id == 3: # For debugging purposes
 #     lat_range = (-29, -28)
 #     lon_range = (150, 151)
-elif range_id == 2:
-    lat_range = (-17, -16)
-    lon_range = (143, 147)
 elif range_id == 3:
     lat_range = (-29, -9)
     lon_range = (138, 154)
@@ -535,7 +485,7 @@ with ProcessPoolExecutor() as executor:
 
 rows = list(results)
 
-HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets/"
+HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets/temp/" # TODO: Change back
 
 if args.no_bias_correction:
     print("no bias correction")
