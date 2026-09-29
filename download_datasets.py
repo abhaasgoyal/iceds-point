@@ -10,7 +10,7 @@ request = {
     "grid": [0.05, 0.05],
     "product_type": ["monthly_mean"],
 }
-
+# WJ: Aby here we don't have Queensland-wide (region 3)
 areas = [
     { "area" : [ -22, 142, -25, 145 ] },
     { "area" : [ -26, 150, -29, 153 ] },
