@@ -26,6 +26,12 @@ def parse_args():
         help="Use forecast data instead of hindcast (default: hindcast)",
     )
     parser.add_argument(
+        "--forecast_month",
+        default=None,
+        help="Single forecast month YYYY-MM; reads from forecast_month/<season>/<YYYY-MM>/ "
+             "(implies --forecast)",
+    )
+    parser.add_argument(
         "--bias",
         choices=["before", "after"],
         default="after",
@@ -39,9 +45,17 @@ is_forecast = args.forecast
 season = args.season
 bias = args.bias
 
-out_dir_cast = "forecast" if is_forecast else "hindcast"
-SRC_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}"
-OUT_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}/heatmaps_queensland_diff"
+if args.forecast_month:
+    BASE_DIR = f"{HOME_DIR}/forecast_month/{season}/{args.forecast_month}"
+    TITLE_SUFFIX = f", {season} season forecast {args.forecast_month}"
+else:
+    out_dir_cast = "forecast" if is_forecast else "hindcast"
+    BASE_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}"
+    TITLE_SUFFIX = ""
+
+SRC_DIR = f"{BASE_DIR}/bias_analysis/{bias}"
+OUT_SUBDIR = "heatmaps_forecast_values" if args.forecast_month else "heatmaps_queensland_diff"
+OUT_DIR = f"{BASE_DIR}/bias_analysis/{bias}/{OUT_SUBDIR}"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -129,7 +143,7 @@ def plot_diff(data, region, metric, lead, feature):
 
     fig.suptitle(
         f"XGBoost vs best-of-3 ({'/'.join(m.upper() for m in OTHER_MODELS)}) {metric.upper()} "
-        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})"
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()}{TITLE_SUFFIX})"
     )
 
     plt.tight_layout()
@@ -161,7 +175,7 @@ def plot_metric(data, region, metric, lead, feature):
     fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(fig_w, fig_h), sharey=True)
     fig.suptitle(
         f"{metric.upper()} comparison between model predictions "
-        f"(Queensland - Region {region}, lead {lead}, {feature.upper()})"
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()}{TITLE_SUFFIX})"
     )
     vmin = result.min().min()
     vmax = result.max().max()
@@ -185,10 +199,64 @@ def plot_metric(data, region, metric, lead, feature):
     print(f"saved {out_path}")
 
 
+def plot_forecast_values(data, region, lead, feature):
+    """Single-month forecast: 2x2 grid of predicted rainfall (XGBoost + 3 GCMs),
+    all on a shared colour scale so the panels are directly comparable."""
+    cols = [f"{m}_pr" for m in MODELS]
+    result = data.set_index(["lat", "lon"])[cols].astype(float)
+    result.columns = MODELS
+
+    model_mean = result.mean()  # skips NaN (e.g. UKMO missing)
+
+    n_lats = result.index.get_level_values("lat").nunique()
+    n_lons = result.index.get_level_values("lon").nunique()
+    cell_size = 0.6
+    fig_w = max(10, n_lons * cell_size * 2)
+    fig_h = max(10, n_lats * cell_size * 2)
+
+    vmin = np.nanmin(result.values) if result.notna().any().any() else 0.0
+    vmax = np.nanmax(result.values) if result.notna().any().any() else 1.0
+
+    fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(fig_w, fig_h), sharey=True)
+    fig.suptitle(
+        f"Predicted rainfall: XGBoost vs GCMs "
+        f"(Queensland - Region {region}, lead {lead}, {feature.upper()}{TITLE_SUFFIX})"
+    )
+    # full lat/lon grid so every panel has the same shape even if a model is NaN somewhere
+    all_lats = sorted(result.index.get_level_values("lat").unique(), reverse=True)  # north on top
+    all_lons = sorted(result.index.get_level_values("lon").unique())  # lon left-to-right
+
+    for idx, model in enumerate(MODELS):
+        i, j = idx // 2, idx % 2
+        pivot = result[model].unstack().reindex(index=all_lats, columns=all_lons)
+        ax = sns.heatmap(
+            pivot, annot=True, fmt=".2f", annot_kws={"size": 8},
+            ax=axes[i, j], vmin=vmin, vmax=vmax, cmap="YlGnBu",
+            square=True, linewidths=0.5, linecolor="white",
+            cbar_kws={"label": "Rainfall (pr)", "shrink": 0.7},
+        )
+        mean_txt = "no data" if np.isnan(model_mean[model]) else f"mean {model_mean[model]:.2f}"
+        ax.set_title(f"{model.upper()}: {mean_txt}")
+
+    plt.tight_layout()
+    out_path = f"{OUT_DIR}/forecast_values_heatmap_{feature}_lead{lead}_region{region}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close(fig)
+    print(f"saved {out_path}")
+
+
 for feature in FEATURE:
     for lead in LEAD:
         for region in REGIONS:
+            src = f"{SRC_DIR}/output_region{region}_lead{lead}_feature{feature}_perc95.0.csv"
+            if not os.path.exists(src):
+                # e.g. 2027-03 only has lead 6 (other leads need init after the last GCM month)
+                print(f"skipping lead {lead} region {region}: {src} not found")
+                continue
             data = load_region(feature, lead, region)
-            for metric in METRICS:
-                plot_diff(data, region, metric, lead, feature)   # diff shown first
-                plot_metric(data, region, metric, lead, feature)
+            if args.forecast_month:
+                plot_forecast_values(data, region, lead, feature)
+            else:
+                for metric in METRICS:
+                    plot_diff(data, region, metric, lead, feature)   # diff shown first
+                    plot_metric(data, region, metric, lead, feature)

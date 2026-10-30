@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 import re
 from concurrent.futures import ProcessPoolExecutor
 
@@ -43,6 +44,12 @@ parser.add_argument('--forecast', action='store_true',
                           "validation (with bias correction applied to predictions "
                           "too), and write output under the 'hindcast' output "
                           "directory.")
+parser.add_argument('--forecast_month', default=None, type=str,
+                     help="Target month as YYYY-MM (e.g. 2026-11). Implies --forecast. "
+                          "Trains exactly as forecast mode (2025 onwards excluded from "
+                          "training) but predicts only this single month and outputs the "
+                          "predicted values (XGBoost + raw GCMs) with no evaluation. "
+                          "Writes output under forecast_month/<season>/<YYYY-MM>/.")
 
 
 # Bias correction options
@@ -61,10 +68,23 @@ parser.add_argument('--bc_extrapolate_extremes', action='store_true',
 
 args = parser.parse_args()
 
+target_year, target_month = None, None
+if args.forecast_month is not None:
+    m = re.fullmatch(r"(\d{4})-(\d{2})", args.forecast_month)
+    if m is None or not 1 <= int(m.group(2)) <= 12:
+        parser.error("--forecast_month must be in YYYY-MM format, e.g. 2026-11")
+    target_year, target_month = int(m.group(1)), int(m.group(2))
+    args.forecast = True  # single-month forecast is always forecast mode
+
+# Number of values per row after "Point" in forecast_month mode
+FORECAST_MONTH_COLS = ["XGBoost_pr", "ecmwf_pr", "ukmo_pr", "access_pr"]
+
 rows = []
 range_id = args.region
 if args.forecast:
     print("In forecast mode:")
+    if args.forecast_month is not None:
+        print(f"Single month: {args.forecast_month}")
 else:
     print("In hindcast mode:")
 print(f"Region: {range_id}")
@@ -79,11 +99,38 @@ radius_inner_circle = 0.6
 n_points_outer_circle = 6
 radius_outer_circle = 1.039
 
+def get_month_series(df):
+    """Return the calendar month (1-12) of each row of the prepared dataset."""
+    if "month" in df.columns:
+        return df["month"].astype(int)
+    if "time" in df.columns:
+        return pd.to_datetime(df["time"]).dt.month
+    if "time" in (df.index.names or []):
+        return pd.Series(pd.DatetimeIndex(df.index.get_level_values("time")).month, index=df.index)
+    if isinstance(df.index, pd.DatetimeIndex):
+        return pd.Series(df.index.month, index=df.index)
+    if {"month_sin", "month_cos"} <= set(df.columns):
+        # prepare_dataset drops "month", but the seasonality feature keeps
+        # angle = 2*pi*(month % 12)/12, so decode the month back from it
+        angle = np.arctan2(df["month_sin"], df["month_cos"])
+        # kept as float so rows with NaN sin/cos stay NaN (and never match) instead of crashing
+        month = np.round(angle * 12 / (2 * np.pi)) % 12
+        return month.replace(0, 12)
+    raise KeyError("Cannot find month information in dataset: expected a 'month' "
+                   "column, a 'time' column, a 'time' index level, or month_sin/month_cos.")
+
+def safe_metric(metric, y_true, y_pred):
+    """Return NaN instead of raising when there are no samples (e.g. UKMO missing for that month)."""
+    if len(y_true) == 0:
+        return np.nan
+    return metric(y_true, y_pred)
+
+
 def run_single_point_analysis(grid_point):
     # Datasets
     silo = xr.open_dataset("/scratch/tm70/ag9761/iceds_datasets/silo_monthly_rain_iceds_3_processed_forecast.nc")
     if args.forecast:
-        gcms = xr.open_mfdataset(["/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new.nc", 
+        gcms = xr.open_mfdataset(["/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new.nc",
                                   "/scratch/tm70/ag9761/iceds_datasets/preprocessed_dataset_3_new_forecast.nc"],
                                   chunks="auto",
                                   compat="override",
@@ -149,7 +196,10 @@ def run_single_point_analysis(grid_point):
         silo, points = dataset_within_radius(silo, grid_point, model_radius, cutoff_points)
         # gcms = dataset_within_radius(gcms, grid_point, model_radius)
 
-        mask = silo["pr"].notnull()
+        # Spatial-only mask (any SILO obs at that cell). A time-varying mask
+        # would inner-join on time and wipe the GCM forecasts for months that
+        # have no SILO obs yet (everything after the last SILO month).
+        mask = silo["pr"].notnull().any("time")
         gcms = gcms.where(mask, drop=True)
 
     # single_point_data_analysis()
@@ -220,9 +270,19 @@ def run_single_point_analysis(grid_point):
 
         if args.forecast:
 
-            val_mask = dataset["year"].isin([2025, 2026])
-            X_train, X_val = X[~val_mask], X[val_mask]
-            y_train, y_val = y[~val_mask], y[val_mask]
+            # Everything from 2025 onwards (incl. 2027 targets) is forecast period, never trained on
+            forecast_years_mask = dataset["year"] >= 2025
+            if args.forecast_month is not None:
+                # Same training data as normal forecast mode; predict one month only
+                val_mask = (dataset["year"] == target_year) & (get_month_series(dataset) == target_month)
+                if not val_mask.any():
+                    print(f"No rows for {args.forecast_month} at {grid_point}, "
+                          f"lead {args.lead_time} - skipping")
+                    return [grid_point] + [np.nan] * len(FORECAST_MONTH_COLS)
+            else:
+                val_mask = forecast_years_mask
+            X_train, X_val = X[~forecast_years_mask], X[val_mask]
+            y_train, y_val = y[~forecast_years_mask], y[val_mask]
             print(X_val)
 
             xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
@@ -384,6 +444,24 @@ def run_single_point_analysis(grid_point):
 
     # single_point_data_analysis(testing)
 
+    if args.forecast_month is not None:
+        # Single-month forecast: output predicted values only, no evaluation
+        lt = args.lead_time - 1
+        gcm_cols = [f"ecmwf_{lt}_pr", f"ukmo_{lt}_pr", f"access_{lt}_pr"]
+
+        if testing.empty:
+            print(f"No centre row for {args.forecast_month} at {grid_point}, lead {args.lead_time}")
+            return [grid_point] + [np.nan] * len(FORECAST_MONTH_COLS)
+
+        # Raw GCM values from the untouched dataset (X_val's GCM columns are
+        # bias-corrected when bias correction is on). Use testing[gcm_cols]
+        # instead if you want the bias-corrected GCM values.
+        raw_gcm = dataset.loc[testing.index, gcm_cols].iloc[0]
+        xgb_value = float(testing["XGBoost"].iloc[0])  # already inverse-transformed to mm
+        print(f"{args.forecast_month} lead {args.lead_time} at {grid_point}: "
+              f"XGBoost={xgb_value}, " + ", ".join(f"{c}={raw_gcm[c]}" for c in gcm_cols))
+        return [grid_point, xgb_value] + [float(raw_gcm[c]) for c in gcm_cols]
+
 
     testing_temp = testing
     if not args.forecast:
@@ -393,10 +471,10 @@ def run_single_point_analysis(grid_point):
     ukmo_mask = ~np.isnan(testing["obs_pr"]) & ~np.isnan(testing[f"ukmo_{args.lead_time - 1}_pr"])
 
     model_mae = {
-        "XGBoost" : mean_absolute_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : mean_absolute_error(testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
-        "ukmo" : mean_absolute_error(testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
-        "access" : mean_absolute_error(testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
+        "XGBoost" : safe_metric(mean_absolute_error, testing_temp["obs_pr"], testing_temp["XGBoost"]),
+        "ecmwf" : safe_metric(mean_absolute_error, testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
+        "ukmo" : safe_metric(mean_absolute_error, testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
+        "access" : safe_metric(mean_absolute_error, testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
     }
 
     for model, mae in model_mae.items():
@@ -404,10 +482,10 @@ def run_single_point_analysis(grid_point):
 
 
     model_rmse = {
-        "XGBoost" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp["XGBoost"]),
-        "ecmwf" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
-        "ukmo" : root_mean_squared_error(testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
-        "access" : root_mean_squared_error(testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
+        "XGBoost" : safe_metric(root_mean_squared_error, testing_temp["obs_pr"], testing_temp["XGBoost"]),
+        "ecmwf" : safe_metric(root_mean_squared_error, testing_temp["obs_pr"], testing_temp[f"ecmwf_{args.lead_time - 1}_pr"]),
+        "ukmo" : safe_metric(root_mean_squared_error, testing["obs_pr"][ukmo_mask], testing[f"ukmo_{args.lead_time - 1}_pr"][ukmo_mask]),
+        "access" : safe_metric(root_mean_squared_error, testing_temp["obs_pr"], testing_temp[f"access_{args.lead_time - 1}_pr"])
     }
 
     for model, rmse in model_rmse.items():
@@ -485,15 +563,24 @@ with ProcessPoolExecutor() as executor:
 
 rows = list(results)
 
-HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets/temp/" # TODO: Change back
+HOME_DIR = "/scratch/tm70/ag9761/iceds_datasets"
 
 if args.no_bias_correction:
     print("no bias correction")
 
-headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae", "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse", "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
-cast_dir  = "forecast" if args.forecast else "hindcast"
+if args.forecast_month is not None:
+    headers = ["Point"] + FORECAST_MONTH_COLS
+else:
+    headers = ["Point", "XGBoost_mae", "ecmwf_mae", "ukmo_mae", "access_mae",
+               "XGBoost_rmse", "ecmwf_rmse", "ukmo_rmse", "access_rmse",
+               "XGBoost_bias", "ecmwf_bias", "ukmo_bias", "access_bias"]
 bias_dir = "before" if args.no_bias_correction else "after"
-output_dir = f"{HOME_DIR}/{cast_dir}/{args.season}/bias_analysis/{bias_dir}"
+if args.forecast_month is not None:
+    output_dir = f"{HOME_DIR}/forecast_month/{args.season}/{args.forecast_month}/bias_analysis/{bias_dir}"
+else:
+    cast_dir  = "forecast" if args.forecast else "hindcast"
+    output_dir = f"{HOME_DIR}/{cast_dir}/{args.season}/bias_analysis/{bias_dir}"
+os.makedirs(output_dir, exist_ok=True)
 
 with open(f"{output_dir}/output_region{range_id}_lead{args.lead_time}_feature{args.feature}_perc{args.bc_exclude_percentile}.csv", mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)

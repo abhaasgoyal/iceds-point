@@ -24,6 +24,12 @@ def parse_args():
         help="Use forecast data instead of hindcast (default: hindcast)",
     )
     parser.add_argument(
+        "--forecast_month",
+        default=None,
+        help="Single forecast month YYYY-MM; reads from forecast_month/<season>/<YYYY-MM>/ "
+             "(implies --forecast)",
+    )
+    parser.add_argument(
         "--bias",
         choices=["before", "after"],
         default="after",
@@ -37,9 +43,16 @@ is_forecast = args.forecast
 season = args.season
 bias = args.bias
 
-out_dir_cast = "forecast" if is_forecast else "hindcast"
-SRC_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}"
-OUT_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}/bias_analysis/{bias}/lead_plots_all"
+if args.forecast_month:
+    BASE_DIR = f"{HOME_DIR}/forecast_month/{season}/{args.forecast_month}"
+    TITLE_SUFFIX = f", forecast {args.forecast_month}"
+else:
+    out_dir_cast = "forecast" if is_forecast else "hindcast"
+    BASE_DIR = f"{HOME_DIR}/{out_dir_cast}/{season}"
+    TITLE_SUFFIX = ""
+
+SRC_DIR = f"{BASE_DIR}/bias_analysis/{bias}"
+OUT_DIR = f"{BASE_DIR}/bias_analysis/{bias}/lead_plots_all"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -111,7 +124,7 @@ def plot_metric_vs_lead(summary, feature, metric):
         axes = [axes]
 
     fig.suptitle(
-        f"Mean {metric.upper()} vs Lead Time ({feature.upper()})",
+        f"Mean {metric.upper()} vs Lead Time ({feature.upper()}{TITLE_SUFFIX})",
         fontsize=16
     )
 
@@ -148,7 +161,7 @@ def plot_metric_vs_lead_combined(summary, feature, metric):
         data=overall, x="lead", y="mean_value", hue="model",
         marker="o", ax=ax
     )
-    ax.set_title(f"Mean {metric.upper()} vs Lead Time ({feature.upper()}, all regions)")
+    ax.set_title(f"Mean {metric.upper()} vs Lead Time ({feature.upper()}, all regions{TITLE_SUFFIX})")
     ax.set_xlabel("Lead time")
     ax.set_ylabel(f"Mean {metric.upper()}")
     ax.set_xticks(LEAD)

@@ -125,9 +125,6 @@ def merge_datasets(range_id: int, is_forecast: bool = False) -> None:
  
     output_path = f"{OUTPUT_DIR}/preprocessed_dataset_{range_id}_new{suffix}.nc"
 
-    if is_forecast:
-        preprocessed_dataset = preprocessed_dataset.isel(time=slice(None, 12))
-
     preprocessed_dataset.to_netcdf(output_path)
     print(f"  -> wrote {output_path}")
  
