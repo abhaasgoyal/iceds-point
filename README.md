@@ -99,3 +99,25 @@ TODO: Look into the results for the following (quoting Barry):
 ```
 The grid cells at -27,153 and -26, 153 have higher errors also (though not as high as the others near Cairns). These are north of Brisbane and fairly close to the coast. Leave these in for now, but these might also need to be flagged after we have done some exploration. It is worth noting that the two cells immediately west of these have also slightly elevated errors (though less than the coastal cells)
 ```
+
+# Operational Forecast Results (Oct 2026-Mar 2027)
+ 
+Forecast rainfall GIFs
+ 
+Predicted rainfall for the operational forecast period, after bias correction (after), Queensland region, wet season.
+ 
+## XGBoost
+ 
+![XGBoost forecast rainfall](gifs_forecast_values/after/forecast_values_XGBoost_cbrt_region3_2026-10_to_2027-03.gif)
+ 
+## ECMWF
+ 
+![ECMWF forecast rainfall](gifs_forecast_values/after/forecast_values_ecmwf_cbrt_region3_2026-10_to_2027-03.gif)
+ 
+## UKMO
+ 
+![UKMO forecast rainfall](gifs_forecast_values/after/forecast_values_ukmo_cbrt_region3_2026-10_to_2027-03.gif)
+ 
+## ACCESS
+ 
+![ACCESS forecast rainfall](gifs_forecast_values/after/forecast_values_access_cbrt_region3_2026-10_to_2027-03.gif)
