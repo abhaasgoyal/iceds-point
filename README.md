@@ -108,16 +108,16 @@ Predicted rainfall for the operational forecast period, after bias correction (a
  
 ## XGBoost
  
-![XGBoost forecast rainfall](gifs_forecast_values/after/forecast_values_XGBoost_cbrt_region3_2026-10_to_2027-03.gif)
+![XGBoost forecast rainfall](data/gifs_forecast_values/after/forecast_values_XGBoost_cbrt_region3_2026-10_to_2027-03.gif)
  
 ## ECMWF
  
-![ECMWF forecast rainfall](gifs_forecast_values/after/forecast_values_ecmwf_cbrt_region3_2026-10_to_2027-03.gif)
+![ECMWF forecast rainfall](data/gifs_forecast_values/after/forecast_values_ecmwf_cbrt_region3_2026-10_to_2027-03.gif)
  
 ## UKMO
  
-![UKMO forecast rainfall](gifs_forecast_values/after/forecast_values_ukmo_cbrt_region3_2026-10_to_2027-03.gif)
+![UKMO forecast rainfall](data/gifs_forecast_values/after/forecast_values_ukmo_cbrt_region3_2026-10_to_2027-03.gif)
  
 ## ACCESS
  
-![ACCESS forecast rainfall](gifs_forecast_values/after/forecast_values_access_cbrt_region3_2026-10_to_2027-03.gif)
+![ACCESS forecast rainfall](data/gifs_forecast_values/after/forecast_values_access_cbrt_region3_2026-10_to_2027-03.gif)
